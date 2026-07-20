@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.exe
+*.msi
+*.dll
+cd
+python
+ngrok
+cloudflared*
+main (1).py
+venv/
