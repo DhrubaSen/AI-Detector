@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AI Content Detector</title>
+<title>Sen's AI Detector</title>
 <style>
   :root {
     --bg: #0f1117;
@@ -287,14 +287,15 @@
 <body>
 
 <header>
-  <h1>AI Content <span>Detector</span></h1>
-  <p>Detect AI-generated, AI-assisted, or human-created content in text, documents, and images</p>
+  <h1>Sen's AI <span>Detector</span></h1>
+  <p>Detect AI-generated, AI-assisted, or human-created content in text, documents, images and video</p>
 </header>
 
 <div class="tabs">
   <button class="tab active" onclick="switchTab('text')">📝 Text</button>
   <button class="tab" onclick="switchTab('document')">📄 Document</button>
   <button class="tab" onclick="switchTab('image')">🖼️ Image</button>
+  <button class="tab" onclick="switchTab('video')">🎬 Video</button>
 </div>
 
 <!-- TEXT PANEL -->
@@ -349,10 +350,49 @@
   <div class="result" id="img-result"></div>
 </div>
 
+<!-- VIDEO PANEL -->
+<div class="panel" id="panel-video">
+  <div class="card">
+    <h2>Upload Video</h2>
+    <div style="background:#1e3a5f;border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:12px;color:#94D2BD;">
+      ⚠️ <strong>Lightweight analysis only</strong> — checks file metadata and software signatures. Does not analyse video frames or audio content. Catches obvious AI video generation tools (Sora, RunwayML, Pika, Kling, Synthesia etc.) only. For in-depth frame-level analysis, a dedicated video forensics tool is recommended.
+    </div>
+    <div class="drop-zone" id="vid-drop" onclick="document.getElementById('vid-input').click()"
+         ondragover="dragOver(event,'vid-drop')" ondragleave="dragLeave('vid-drop')" ondrop="dropFile(event,'vid')">
+      <div class="icon">🎬</div>
+      <p><strong>Click to upload</strong> or drag & drop</p>
+      <p style="margin-top:6px">MP4 · MOV · AVI · WebM · MKV · M4V &nbsp;·&nbsp; Max 100MB</p>
+    </div>
+    <input type="file" id="vid-input" accept=".mp4,.mov,.avi,.webm,.mkv,.m4v" onchange="fileSelected(event,'vid')">
+    <div class="file-info" id="vid-file-info">
+      <span>📎</span>
+      <span class="name" id="vid-file-name"></span>
+      <span class="size" id="vid-file-size"></span>
+    </div>
+    <button class="btn" id="vid-btn" onclick="analyseVideo()" disabled>🔍 Analyse Video</button>
+  </div>
+  <div class="result" id="vid-result"></div>
+</div>
+
 <div class="disclaimer">
-  ⚠️ This tool uses statistical signals for analysis and is not 100% accurate.<br>
-  Results should be used as one input in a broader evaluation, not as definitive proof.<br>
-  Accuracy improves with longer text samples (500+ words recommended for documents).
+  <div style="margin-bottom:12px;">
+    ⚠️ <strong>Accuracy Notice:</strong> This tool uses statistical signals for analysis and is not 100% accurate.
+    Results should be used as one input in a broader evaluation, not as definitive proof.
+    Accuracy improves with longer text samples (500+ words recommended for documents).
+  </div>
+  <div style="border-top:1px solid #2a2d45;padding-top:12px;margin-bottom:12px;">
+    🔒 <strong>Privacy:</strong> Your upload is used solely for the purpose it is uploaded — AI content detection analysis.
+    Sen's AI Detector does not share your upload with any third party. All analysis runs on our server only.
+    Your upload is not stored, retained, or used for any other purpose.
+  </div>
+  <div style="border-top:1px solid #2a2d45;padding-top:12px;margin-bottom:12px;">
+    ⚖️ <strong>Copyright:</strong> By using this tool you confirm that you are not violating any copyright law.
+    Sen's AI Detector does not reproduce, store, or distribute your uploaded content.
+    The act of uploading content for AI detection analysis constitutes fair use under applicable copyright law.
+  </div>
+  <div style="border-top:1px solid #2a2d45;padding-top:12px;color:#475569;">
+    Sen's AI Detector &nbsp;·&nbsp; Built by Dhruba Sen &nbsp;·&nbsp; For independent second opinions visit the links above after your analysis.
+  </div>
 </div>
 
 <script>
@@ -370,6 +410,7 @@ const LABELS = {
 
 let docFile = null;
 let imgFile = null;
+let vidFile = null;
 
 function switchTab(tab) {
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -396,7 +437,13 @@ function fileSelected(e, type) {
   if (file) setFile(file, type);
 }
 function setFile(file, type) {
-  if (type === 'doc') {
+  if (type === 'vid') {
+    vidFile = file;
+    document.getElementById('vid-file-name').textContent = file.name;
+    document.getElementById('vid-file-size').textContent = formatSize(file.size);
+    document.getElementById('vid-file-info').classList.add('show');
+    document.getElementById('vid-btn').disabled = false;
+  } else if (type === 'doc') {
     docFile = file;
     document.getElementById('doc-file-name').textContent = file.name;
     document.getElementById('doc-file-size').textContent = formatSize(file.size);
@@ -534,12 +581,20 @@ function renderResult(data, targetId) {
       <div class="explanation">${data.explanation || ''}</div>
     </div>
     ${signalsHtml}
-    <div class="card" style="text-align:center;padding:16px;">
-      <div style="color:#64748b;font-size:12px;margin-bottom:10px;">Want a second opinion from an academic-grade detector?</div>
-      <a href="https://typeset.io/ai-detector" target="_blank" class="scispace-btn">
-        🔬 Get Second Opinion from SciSpace
-      </a>
-      <div style="color:#64748b;font-size:11px;margin-top:8px;">Opens SciSpace AI Detector in a new tab — paste your text there for academic-grade analysis</div>
+    <div class="card" style="padding:16px;">
+      <div style="font-size:14px;font-weight:600;color:#94D2BD;margin-bottom:10px;cursor:pointer;" onclick="toggleSecondOpinion()">
+        💡 How to Get a Second Opinion <span id="second-opinion-toggle" style="font-size:11px;color:#64748b;">▼ show</span>
+      </div>
+      <div id="second-opinion-panel" style="display:none;">
+        <p style="font-size:13px;color:#e2e8f0;margin-bottom:10px;">
+          For an independent second opinion, copy your upload and paste it into one of these tools directly.
+        </p>
+        <div style="font-size:13px;color:#94D2BD;line-height:2;">
+          🔬 <strong>SciSpace</strong> — <a href="https://scispace.com/ai-detector" target="_blank" style="color:#0A9396;">scispace.com/ai-detector</a> — best for technical and academic content<br>
+          📝 <strong>Originality.ai</strong> — <a href="https://originality.ai" target="_blank" style="color:#0A9396;">originality.ai</a> — best for general content<br>
+        </div>
+
+      </div>
     </div>`;
   el.classList.add('show');
 }
@@ -577,6 +632,40 @@ function renderImageResult(data, targetId) {
   if (sig.avg_channel_std) sigHtml += `<div class="signal-item"><div class="signal-name">Color Variance</div><div class="signal-value">${sig.avg_channel_std}</div></div>`;
   if (sig.has_camera_exif !== undefined) sigHtml += `<div class="signal-item"><div class="signal-name">Camera EXIF</div><div class="signal-value" style="font-size:14px">${sig.has_camera_exif ? '✅ Yes' : '❌ No'}</div></div>`;
 
+  // C2PA compliance block
+  let complianceHtml = '';
+  const c2pa = data.c2pa || {};
+  const eu = data.eu_compliance || {};
+
+  if (eu.status === 'NON_COMPLIANT') {
+    complianceHtml = `
+      <div class="card" style="border-color:rgba(220,38,38,0.4);background:rgba(220,38,38,0.05);">
+        <h2 style="color:#f87171;">⚠️ EU AI Act Article 50 — Non-Compliant</h2>
+        <p style="font-size:14px;color:#f87171;margin-bottom:8px;">${eu.issue}</p>
+        <p style="font-size:13px;color:#64748b;">Enforcement deadline: <strong style="color:#EE9B00;">${eu.deadline}</strong></p>
+        <p style="font-size:13px;color:#64748b;margin-top:6px;">Action required: ${eu.action_required}</p>
+        <div style="margin-top:12px;padding:10px;background:#0a2c1a;border-radius:6px;">
+          <p style="font-size:12px;color:#94D2BD;">C2PA (Coalition for Content Provenance and Authenticity) metadata: <strong>NOT FOUND</strong></p>
+          <p style="font-size:12px;color:#64748b;margin-top:4px;">AI-generated content must embed machine-readable provenance data per EU AI Act Art.50 and California SB 942.</p>
+        </div>
+      </div>`;
+  } else if (eu.status === 'COMPLIANT') {
+    complianceHtml = `
+      <div class="card" style="border-color:rgba(16,185,129,0.4);background:rgba(16,185,129,0.05);">
+        <h2 style="color:#10b981;">✅ EU AI Act Article 50 — Compliant</h2>
+        <p style="font-size:14px;color:#94D2BD;">${eu.note}</p>
+        ${c2pa.creator_tool ? `<p style="font-size:13px;color:#64748b;margin-top:6px;">Creator tool: ${c2pa.creator_tool}</p>` : ''}
+        ${c2pa.ai_assertions && c2pa.ai_assertions.length > 0 ? `<p style="font-size:13px;color:#64748b;">AI assertions: ${c2pa.ai_assertions.join(', ')}</p>` : ''}
+      </div>`;
+  } else if (eu.status === 'NOT_APPLICABLE') {
+    complianceHtml = `
+      <div class="card" style="border-color:rgba(100,116,139,0.3);">
+        <h2 style="color:#64748b;">EU AI Act Article 50 — Not Applicable</h2>
+        <p style="font-size:13px;color:#64748b;">${eu.note}</p>
+        <p style="font-size:12px;color:#64748b;margin-top:4px;">C2PA watermark check: ${c2pa.has_c2pa ? '✅ Present' : '❌ Not found'}</p>
+      </div>`;
+  }
+
   el.innerHTML = `
     <div class="card">
       <div class="meta">${data.filename || ''}</div>
@@ -593,7 +682,93 @@ function renderImageResult(data, targetId) {
       <div class="explanation">${data.explanation || ''}</div>
       ${indicatorsHtml ? `<div class="indicators">${indicatorsHtml}</div>` : ''}
     </div>
+    ${complianceHtml}
     ${sigHtml ? `<div class="card"><h2>Image Signals</h2><div class="signals-grid">${sigHtml}</div></div>` : ''}`;
+  el.classList.add('show');
+}
+
+function toggleSecondOpinion() {
+  const panel = document.getElementById('second-opinion-panel');
+  const toggle = document.getElementById('second-opinion-toggle');
+  if (panel.style.display === 'none') {
+    panel.style.display = 'block';
+    toggle.textContent = '▲ hide';
+  } else {
+    panel.style.display = 'none';
+    toggle.textContent = '▼ show';
+  }
+}
+
+async function analyseVideo() {
+  if (!vidFile) return;
+  const btn = document.getElementById('vid-btn');
+  btn.disabled = true;
+  btn.classList.add('loading');
+  btn.textContent = 'Analysing...';
+  const form = new FormData();
+  form.append('file', vidFile);
+  try {
+    const res = await fetch('/api/check-video', { method: 'POST', body: form });
+    const data = await res.json();
+    renderVideoResult(data, 'vid-result');
+  } catch(e) {
+    document.getElementById('vid-result').innerHTML = `<div class="error-box">Error: ${e.message}</div>`;
+    document.getElementById('vid-result').classList.add('show');
+  } finally {
+    btn.disabled = false;
+    btn.classList.remove('loading');
+    btn.textContent = '🔍 Analyse Video';
+  }
+}
+
+function renderVideoResult(data, targetId) {
+  const el = document.getElementById(targetId);
+  const label = data.label || 'unknown';
+  const conf = data.confidence || 0;
+  const verdictLabel = LABELS[label] || label;
+
+  let indicatorsHtml = '';
+  if (data.ai_indicators && data.ai_indicators.length > 0) {
+    const items = data.ai_indicators.map(i => `
+      <div class="indicator-item">
+        <div class="indicator-dot ai"></div>
+        <span>${i}</span>
+      </div>`).join('');
+    indicatorsHtml += `<div class="indicator-group"><div class="indicator-title ai">🤖 AI Indicators</div>${items}</div>`;
+  }
+  if (data.human_indicators && data.human_indicators.length > 0) {
+    const items = data.human_indicators.map(i => `
+      <div class="indicator-item">
+        <div class="indicator-dot human"></div>
+        <span>${i}</span>
+      </div>`).join('');
+    indicatorsHtml += `<div class="indicator-group"><div class="indicator-title human">📷 Human/Camera Indicators</div>${items}</div>`;
+  }
+
+  const sig = data.signals || {};
+  let sigHtml = '';
+  if (sig.format) sigHtml += `<div class="signal-item"><div class="signal-name">Format</div><div class="signal-value" style="font-size:14px">${sig.format}</div></div>`;
+  if (sig.file_size_mb) sigHtml += `<div class="signal-item"><div class="signal-name">File Size</div><div class="signal-value" style="font-size:14px">${sig.file_size_mb}MB</div></div>`;
+  if (sig.ai_tools_found) sigHtml += `<div class="signal-item"><div class="signal-name">AI Tools Found</div><div class="signal-value" style="font-size:12px">${sig.ai_tools_found.join(', ')}</div></div>`;
+
+  el.innerHTML = `
+    <div class="card">
+      <div class="meta">${data.filename || ''}</div>
+      <div class="verdict ${label}">
+        <div class="verdict-icon">${verdictLabel.split(' ')[0]}</div>
+        <div>
+          <div class="verdict-label">${verdictLabel.substring(verdictLabel.indexOf(' ')+1)}</div>
+          <div class="verdict-conf">${conf}% confidence</div>
+        </div>
+      </div>
+      <div class="confidence-bar ${label}">
+        <div class="confidence-fill" style="width:${conf}%"></div>
+      </div>
+      <div class="explanation">${data.explanation || ''}</div>
+      ${indicatorsHtml ? `<div class="indicators">${indicatorsHtml}</div>` : ''}
+      ${data.disclaimer ? `<div style="margin-top:12px;padding:10px 14px;background:#1e3a5f;border-radius:8px;font-size:12px;color:#94D2BD;">${data.disclaimer}</div>` : ''}
+    </div>
+    ${sigHtml ? `<div class="card"><h2>Video Signals</h2><div class="signals-grid">${sigHtml}</div></div>` : ''}`;
   el.classList.add('show');
 }
 </script>
