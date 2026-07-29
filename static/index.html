@@ -357,19 +357,38 @@
     <div style="background:#1e3a5f;border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:12px;color:#94D2BD;">
       ⚠️ <strong>Lightweight analysis only</strong> — checks file metadata and software signatures. Does not analyse video frames or audio content. Catches obvious AI video generation tools (Sora, RunwayML, Pika, Kling, Synthesia etc.) only. For in-depth frame-level analysis, a dedicated video forensics tool is recommended.
     </div>
-    <div class="drop-zone" id="vid-drop" onclick="document.getElementById('vid-input').click()"
-         ondragover="dragOver(event,'vid-drop')" ondragleave="dragLeave('vid-drop')" ondrop="dropFile(event,'vid')">
-      <div class="icon">🎬</div>
-      <p><strong>Click to upload</strong> or drag & drop</p>
-      <p style="margin-top:6px">MP4 · MOV · AVI · WebM · MKV · M4V &nbsp;·&nbsp; Max 100MB</p>
+    <!-- Video sub-tabs -->
+    <div style="display:flex;gap:8px;margin-bottom:16px;">
+      <button class="tab active" id="vid-tab-upload" onclick="switchVideoTab('upload')" style="flex:1;padding:8px;font-size:13px;">📁 Upload File</button>
+      <button class="tab" id="vid-tab-url" onclick="switchVideoTab('url')" style="flex:1;padding:8px;font-size:13px;">🔗 Video URL</button>
     </div>
-    <input type="file" id="vid-input" accept=".mp4,.mov,.avi,.webm,.mkv,.m4v" onchange="fileSelected(event,'vid')">
-    <div class="file-info" id="vid-file-info">
-      <span>📎</span>
-      <span class="name" id="vid-file-name"></span>
-      <span class="size" id="vid-file-size"></span>
+
+    <!-- Upload panel -->
+    <div id="vid-upload-panel">
+      <div class="drop-zone" id="vid-drop" onclick="document.getElementById('vid-input').click()"
+           ondragover="dragOver(event,'vid-drop')" ondragleave="dragLeave('vid-drop')" ondrop="dropFile(event,'vid')">
+        <div class="icon">🎬</div>
+        <p><strong>Click to upload</strong> or drag & drop</p>
+        <p style="margin-top:6px">MP4 · MOV · AVI · WebM · MKV · M4V &nbsp;·&nbsp; Max 100MB</p>
+      </div>
+      <input type="file" id="vid-input" accept=".mp4,.mov,.avi,.webm,.mkv,.m4v" onchange="fileSelected(event,'vid')">
+      <div class="file-info" id="vid-file-info">
+        <span>📎</span>
+        <span class="name" id="vid-file-name"></span>
+        <span class="size" id="vid-file-size"></span>
+      </div>
+      <button class="btn" id="vid-btn" onclick="analyseVideo()" disabled>🔍 Analyse Video</button>
     </div>
-    <button class="btn" id="vid-btn" onclick="analyseVideo()" disabled>🔍 Analyse Video</button>
+
+    <!-- URL panel -->
+    <div id="vid-url-panel" style="display:none;">
+      <div style="background:#152638;border-radius:8px;padding:12px 14px;margin-bottom:12px;font-size:12px;color:#94D2BD;">
+        🔗 Paste a video URL — YouTube, Vimeo, or direct video link. Metadata analysis only — no video is downloaded.
+      </div>
+      <input type="text" id="vid-url-input" placeholder="https://youtube.com/watch?v=... or any video URL"
+        style="width:100%;background:#0f1117;border:1px solid #2a2d45;border-radius:8px;padding:12px 14px;color:#e2e8f0;font-size:14px;outline:none;margin-bottom:12px;">
+      <button class="btn" id="vid-url-btn" onclick="analyseVideoUrl()">🔍 Analyse URL</button>
+    </div>
   </div>
   <div class="result" id="vid-result"></div>
 </div>
@@ -590,8 +609,7 @@ function renderResult(data, targetId) {
           For an independent second opinion, copy your upload and paste it into one of these tools directly.
         </p>
         <div style="font-size:13px;color:#94D2BD;line-height:2;">
-          🔬 <strong>SciSpace</strong> — <a href="https://scispace.com/ai-detector" target="_blank" style="color:#0A9396;">scispace.com/ai-detector</a> — best for technical and academic content<br>
-          📝 <strong>Originality.ai</strong> — <a href="https://originality.ai" target="_blank" style="color:#0A9396;">originality.ai</a> — best for general content<br>
+          For example, <strong>SciSpace</strong> (<a href="https://scispace.com/ai-detector" target="_blank" style="color:#0A9396;">scispace.com/ai-detector</a>) is one option for technical and scientific content. Other detectors are available — search "AI content detector" to find options that suit your needs.<br>
         </div>
 
       </div>
@@ -685,6 +703,38 @@ function renderImageResult(data, targetId) {
     ${complianceHtml}
     ${sigHtml ? `<div class="card"><h2>Image Signals</h2><div class="signals-grid">${sigHtml}</div></div>` : ''}`;
   el.classList.add('show');
+}
+
+function switchVideoTab(tab) {
+  document.getElementById('vid-upload-panel').style.display = tab === 'upload' ? 'block' : 'none';
+  document.getElementById('vid-url-panel').style.display = tab === 'url' ? 'block' : 'none';
+  document.getElementById('vid-tab-upload').classList.toggle('active', tab === 'upload');
+  document.getElementById('vid-tab-url').classList.toggle('active', tab === 'url');
+}
+
+async function analyseVideoUrl() {
+  const url = document.getElementById('vid-url-input').value.trim();
+  if (!url) return;
+  const btn = document.getElementById('vid-url-btn');
+  btn.disabled = true;
+  btn.classList.add('loading');
+  btn.textContent = 'Analysing...';
+  try {
+    const res = await fetch('/api/check-video-url', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url })
+    });
+    const data = await res.json();
+    renderVideoResult(data, 'vid-result');
+  } catch(e) {
+    document.getElementById('vid-result').innerHTML = `<div class="error-box">Error: ${e.message}</div>`;
+    document.getElementById('vid-result').classList.add('show');
+  } finally {
+    btn.disabled = false;
+    btn.classList.remove('loading');
+    btn.textContent = '🔍 Analyse URL';
+  }
 }
 
 function toggleSecondOpinion() {

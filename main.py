@@ -170,6 +170,75 @@ def repetition_score(sentences: list[str]) -> float:
     return repetition
 
 
+# Additional human signal detectors
+SELF_DEPRECATING = [
+    "i must confess", "i am embarrassed", "i am embarassed", "frankly",
+    "i confess", "i must admit", "to be honest", "i am afraid",
+    "forgive me", "i apologize", "i apologise", "i regret",
+]
+
+AUTOBIOGRAPHICAL = [
+    "memory lane", "i recall", "i remember", "in those days",
+    "it was", "when i was", "years ago", "at that time",
+    "in my experience", "i have found", "i have seen",
+    "looking back", "in retrospect",
+]
+
+SCAN_ARTIFACTS = ["¬", "­", "be¬", "how¬", "in¬"]
+
+PRE_AI_FORMAL = [
+    "hitherto", "heretofore", "whilst", "amongst", "henceforth",
+    "thereupon", "wherein", "thereof", "hereby", "whereby",
+    "aforementioned", "notwithstanding", "inasmuch", "insofar",
+    "acceding", "clubbed under", "blew up",
+]
+
+def self_deprecating_density(text: str) -> float:
+    text_lower = text.lower()
+    count = sum(1 for phrase in SELF_DEPRECATING if phrase in text_lower)
+    return min(1.0, count / 3)
+
+def autobiographical_density(text: str) -> float:
+    text_lower = text.lower()
+    count = sum(1 for phrase in AUTOBIOGRAPHICAL if phrase in text_lower)
+    return min(1.0, count / 3)
+
+def has_scan_artifacts(text: str) -> bool:
+    return any(artifact in text for artifact in SCAN_ARTIFACTS)
+
+def pre_ai_formal_density(text: str) -> float:
+    text_lower = text.lower()
+    count = sum(1 for phrase in PRE_AI_FORMAL if phrase in text_lower)
+    return min(1.0, count / 2)
+
+PROFESSIONAL_FIRST_PERSON = [
+    "my name is", "i have a", "i was", "i had", "i recognized",
+    "i observed", "i started", "i believe", "i built", "i developed",
+    "i created", "i noticed", "i worked", "i joined", "i completed",
+    "i am a", "i am an", "i hold", "i founded", "i designed",
+    "let me know", "please find", "i would", "i could", "i should",
+    "my experience", "my background", "my work", "my team",
+]
+
+def professional_narrative_score(text: str) -> float:
+    """First-person professional narrative — LinkedIn/cover letter/proposal style."""
+    text_lower = text.lower()
+    count = sum(1 for phrase in PROFESSIONAL_FIRST_PERSON if phrase in text_lower)
+    return min(1.0, count / 4)
+
+
+def spelling_variation_score(text: str) -> float:
+    """Detect human spelling variations and typos."""
+    common_variations = [
+        "exhilerated", "embarassed", "wierd", "recieve", "occured",
+        "seperately", "definately", "occurance", "untill", "dont",
+        "cant", "wont", "ive", "id ", "youre", "theyre", "its a",
+    ]
+    text_lower = text.lower()
+    count = sum(1 for v in common_variations if v in text_lower)
+    return min(1.0, count * 0.5)
+
+
 def analyse_text(text: str) -> dict:
     """
     Main text analysis. Returns scores and classification.
@@ -182,48 +251,87 @@ def analyse_text(text: str) -> dict:
             "signals": {}
         }
 
-    sentences = tokenize_sentences(text)
-    perp = compute_perplexity_proxy(text)
+    # Clean scan artifacts before analysis
+    clean_text = text.replace("¬", "").replace("­", "")
+
+    sentences = tokenize_sentences(clean_text)
+    perp = compute_perplexity_proxy(clean_text)
     sl_var = sentence_length_variance(sentences)
-    hedge = hedge_density(text)
-    human = human_marker_density(text)
-    vocab = vocabulary_richness(text)
+    hedge = hedge_density(clean_text)
+    human = human_marker_density(clean_text)
+    vocab = vocabulary_richness(clean_text)
     rep = repetition_score(sentences)
+
+    # Additional human signals
+    prof_narr = professional_narrative_score(clean_text)
+    self_dep = self_deprecating_density(clean_text)
+    autobio = autobiographical_density(clean_text)
+    scan_art = has_scan_artifacts(text)  # check original text
+    pre_ai = pre_ai_formal_density(clean_text)
+    spell_var = spelling_variation_score(clean_text)
 
     # ── Scoring ───────────────────────────────────────────────────────────────
     # Each signal contributes to AI probability (0-1)
 
     # Low perplexity variance → AI-like
-    perp_score = max(0, 1 - (perp / 3.0))  # normalize: variance > 3 = human
+    perp_score = max(0, 1 - (perp / 3.0))
 
     # Low sentence length variance → AI-like
-    sl_score = max(0, 1 - (sl_var / 50.0))  # normalize: var > 50 = human
+    sl_score = max(0, 1 - (sl_var / 50.0))
 
     # High hedge density → AI-like
     hedge_score = min(1.0, hedge * 15)
 
-    # High human markers → human
-    human_score = min(1.0, human * 20)  # inverted: high = human
+    # High human markers → human (inverted)
+    human_score = min(1.0, human * 20)
 
-    # Low vocab richness → AI-like (repetitive)
+    # Low vocab richness → AI-like
     vocab_score = max(0, 1 - vocab)
 
     # High repetition → AI-like
     rep_score = rep
 
-    # Weighted ensemble
+    # Weighted ensemble (base)
+    # Entropy variance reduced in weight — clean professional writing
+    # should not be penalised as AI. Hedge words and repetition are
+    # stronger discriminators for business/professional text.
     ai_probability = (
-        0.25 * perp_score +
-        0.15 * sl_score +
-        0.25 * hedge_score +
-        0.15 * vocab_score +
-        0.10 * rep_score +
-        0.10 * (1 - human_score)  # absence of human markers
+        0.12 * perp_score +        # reduced — clean writing != AI
+        0.12 * sl_score +           # reduced — professional writing is uniform
+        0.30 * hedge_score +        # increased — strongest AI signal
+        0.15 * vocab_score +        # unchanged
+        0.16 * rep_score +          # increased — repetition is reliable
+        0.15 * (1 - human_score)   # unchanged
     )
 
-    # Human markers strongly push toward human
+    # ── Human signal adjustments ──────────────────────────────────────────────
+    # Self-deprecating voice — strong human signal
+    if self_dep > 0:
+        ai_probability = max(0, ai_probability - self_dep * 0.20)
+
+    # Autobiographical narrative — strong human signal
+    if autobio > 0:
+        ai_probability = max(0, ai_probability - autobio * 0.20)
+
+    # Scan artifacts — document is from a physical/historical source
+    if scan_art:
+        ai_probability = max(0, ai_probability - 0.25)
+
+    # Pre-AI formal English vocabulary — historical/academic writing
+    if pre_ai > 0:
+        ai_probability = max(0, ai_probability - pre_ai * 0.15)
+
+    # Spelling variations and typos — human signal
+    if spell_var > 0:
+        ai_probability = max(0, ai_probability - spell_var * 0.10)
+
+    # Professional first-person narrative — LinkedIn/proposal/bio style
+    if prof_narr > 0:
+        ai_probability = max(0, ai_probability - prof_narr * 0.20)
+
+    # General human markers
     if human_score > 0.1:
-        ai_probability = max(0, ai_probability - human_score * 0.3)
+        ai_probability = max(0, ai_probability - human_score * 0.25)
 
     ai_probability = round(min(1.0, max(0.0, ai_probability)), 3)
 
@@ -263,6 +371,12 @@ def analyse_text(text: str) -> dict:
             "human_marker_density": round(human, 4),
             "vocabulary_richness": round(vocab, 4),
             "repetition_score": round(rep, 4),
+            "self_deprecating_voice": round(self_dep, 4),
+            "autobiographical_narrative": round(autobio, 4),
+            "scan_artifacts_detected": scan_art,
+            "pre_ai_formal_english": round(pre_ai, 4),
+            "spelling_variations": round(spell_var, 4),
+            "professional_narrative": round(prof_narr, 4),
         },
         "word_count": len(text.split()),
         "sentence_count": len(sentences),
@@ -848,6 +962,123 @@ async def check_video(file: UploadFile = File(...)):
 
     result = analyse_video(content, file.filename)
     result["filename"] = file.filename
+    cache[cache_key] = result
+    return result
+
+
+@app.post("/api/check-video-url")
+async def check_video_url(payload: dict):
+    """
+    Lightweight video URL metadata analysis.
+    Checks URL patterns, domain, and query parameters for AI generation signals.
+    No video is downloaded — URL metadata analysis only.
+    """
+    url = payload.get("url", "").strip()
+    if not url:
+        raise HTTPException(status_code=400, detail="No URL provided")
+
+    import urllib.parse
+    cache_key = hashlib.sha256(url.encode()).hexdigest()
+    if cache_key in cache:
+        return cache[cache_key]
+
+    ai_indicators = []
+    human_indicators = []
+    signals = {}
+    signals["url"] = url
+
+    parsed = urllib.parse.urlparse(url.lower())
+    domain = parsed.netloc.replace("www.", "")
+    signals["domain"] = domain
+
+    # ── Known AI video platforms ──────────────────────────────────────────────
+    AI_VIDEO_PLATFORMS = {
+        "runwayml.com": "RunwayML (Gen-2/Gen-3)",
+        "app.runwayml.com": "RunwayML",
+        "pika.art": "Pika Labs",
+        "kling.ai": "Kling AI",
+        "sora.com": "OpenAI Sora",
+        "dream-machine.ai": "Luma Dream Machine",
+        "lumalabs.ai": "Luma AI",
+        "synthesia.io": "Synthesia",
+        "heygen.com": "HeyGen",
+        "d-id.com": "D-ID",
+        "invideo.io": "InVideo AI",
+        "pictory.ai": "Pictory AI",
+        "fliki.ai": "Fliki",
+        "vidnoz.com": "Vidnoz",
+        "colossyan.com": "Colossyan",
+        "hourone.ai": "Hour One",
+        "deepbrain.io": "DeepBrain AI",
+        "elai.io": "Elai",
+        "steve.ai": "Steve AI",
+        "rawshorts.com": "Raw Shorts",
+    }
+
+    # ── Known human video platforms ───────────────────────────────────────────
+    HUMAN_VIDEO_PLATFORMS = {
+        "youtube.com": "YouTube",
+        "youtu.be": "YouTube",
+        "vimeo.com": "Vimeo",
+        "dailymotion.com": "Dailymotion",
+        "twitch.tv": "Twitch",
+        "tiktok.com": "TikTok",
+        "instagram.com": "Instagram",
+        "facebook.com": "Facebook",
+        "twitter.com": "Twitter/X",
+        "x.com": "Twitter/X",
+        "linkedin.com": "LinkedIn",
+        "rumble.com": "Rumble",
+    }
+
+    # Check domain
+    if domain in AI_VIDEO_PLATFORMS:
+        tool = AI_VIDEO_PLATFORMS[domain]
+        ai_indicators.append(f"Known AI video platform: {tool}")
+        signals["platform"] = tool
+        label = "ai_generated"
+        confidence = 92
+        explanation = f"URL is from {tool} — a known AI video generation platform."
+    elif domain in HUMAN_VIDEO_PLATFORMS:
+        platform = HUMAN_VIDEO_PLATFORMS[domain]
+        human_indicators.append(f"Human video platform: {platform}")
+        signals["platform"] = platform
+
+        # YouTube specific checks
+        if "youtube" in domain or "youtu.be" in domain:
+            label = "uncertain"
+            confidence = 0
+            explanation = "YouTube URL detected. URL-only analysis cannot determine whether this video is AI-generated or human-created — YouTube hosts both. For accurate analysis, download the video and upload it directly using the Upload File tab."
+            human_indicators.append("YouTube is a general platform hosting both human and AI-generated content")
+        else:
+            label = "uncertain"
+            confidence = 0
+            explanation = f"{platform} hosts both human and AI-generated content. URL-only analysis cannot determine content origin. Download the video and upload it directly for accurate analysis."
+    else:
+        # Unknown domain — check for AI signals in URL path
+        full_url = url.lower()
+        ai_url_signals = ["ai-generated", "ai_generated", "sora", "runway", "pika",
+                         "synthesia", "heygen", "deepfake", "artificial"]
+        found = [s for s in ai_url_signals if s in full_url]
+        if found:
+            ai_indicators.append(f"AI-related terms in URL: {', '.join(found)}")
+            label = "ai_generated"
+            confidence = 70
+            explanation = f"AI-related terms detected in URL path."
+        else:
+            label = "uncertain"
+            confidence = 40
+            explanation = f"Unknown video platform. Cannot determine AI vs human content from URL metadata alone."
+
+    result = {
+        "label": label,
+        "confidence": confidence,
+        "explanation": explanation,
+        "ai_indicators": ai_indicators,
+        "human_indicators": human_indicators,
+        "signals": signals,
+        "disclaimer": "⚠️ URL analysis only — no video downloaded or processed. Results based on platform domain and URL patterns. For accurate analysis, download and upload the video file directly.",
+    }
     cache[cache_key] = result
     return result
 
