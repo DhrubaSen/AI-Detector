@@ -30,7 +30,13 @@ except ImportError:
     DOCX_OK = False
 
 try:
-    from PIL import Image
+    import numpy as np
+    NUMPY_OK = True
+except ImportError:
+    NUMPY_OK = False
+
+try:
+    from PIL import Image, ImageFilter
     from PIL.ExifTags import TAGS
     PIL_OK = True
 except ImportError:
@@ -228,15 +234,44 @@ def professional_narrative_score(text: str) -> float:
 
 
 def spelling_variation_score(text: str) -> float:
-    """Detect human spelling variations and typos."""
+    """Detect human spelling variations, typos, and SMS/WhatsApp style."""
     common_variations = [
+        # Typos
         "exhilerated", "embarassed", "wierd", "recieve", "occured",
-        "seperately", "definately", "occurance", "untill", "dont",
-        "cant", "wont", "ive", "id ", "youre", "theyre", "its a",
+        "seperately", "definately", "occurance", "untill",
+        # Contractions without apostrophe
+        "dont", "cant", "wont", "ive", "youre", "theyre",
+        # SMS/WhatsApp shorthand — very strong human signal
+        "shud", "cud", "wud", "bcoz", "bcause", "thru",
+        "gr8", "l8r", "b4 ", "pls ", "plz", "sry ",
+        "omg", "lmao", "btw ", "imo ", "tbh ", "ngl",
+        "idk ", "fyi ", "asap", "ur ", "u r",
     ]
     text_lower = text.lower()
     count = sum(1 for v in common_variations if v in text_lower)
-    return min(1.0, count * 0.5)
+
+    # Bonus: non-Latin script = strong human signal
+    non_latin = sum(1 for c in text if ord(c) > 0x00FF)
+    if non_latin > 2:
+        count += 2
+
+    # Emoji = human signal
+    emoji_ranges = [(0x1F300, 0x1F9FF), (0x2600, 0x26FF), (0x2700, 0x27BF)]
+    for c in text:
+        cp = ord(c)
+        if any(s <= cp <= e for s, e in emoji_ranges):
+            count += 1
+            break
+
+    # URL sharing = human behaviour
+    if "http://" in text or "https://" in text:
+        count += 1
+
+    # Social media markers
+    if "@" in text or "#" in text:
+        count += 1
+
+    return min(1.0, count * 0.4)
 
 
 # ── Creative Writing AI Detection Signals ────────────────────────────────────
@@ -620,6 +655,85 @@ def check_c2pa(content: bytes, mime_type: str = "image/png") -> dict:
         }
 
 
+def fft_frequency_analysis(img_rgb) -> dict:
+    """
+    Frequency domain analysis using FFT.
+    Real photos have natural high-frequency noise from camera sensors.
+    AI images have artificially low noise or unusual frequency distributions.
+    
+    Key signals:
+    - residual_std: high = natural camera noise, low = AI smoothing
+    - noise_kurtosis: moderate (3-15) = natural, very high = screenshot/diagram
+    - AI contribution: 0-0.4 added to AI probability score
+    """
+    if not NUMPY_OK or not PIL_OK:
+        return {"available": False}
+    
+    try:
+        gray = np.array(img_rgb.convert("L"), dtype=np.float32)
+        h, w = gray.shape
+
+        # High-frequency residual — difference between image and blurred version
+        pil_gray = Image.fromarray(gray.astype(np.uint8))
+        blurred = np.array(pil_gray.filter(ImageFilter.GaussianBlur(radius=2)), dtype=np.float32)
+        residual = (gray - blurred).flatten()
+
+        residual_std = float(np.std(residual))
+        mean_r = float(np.mean(residual))
+        std_r = float(np.std(residual))
+        kurtosis = float(np.mean(((residual - mean_r) / max(std_r, 0.001)) ** 4))
+
+        # Local variance coefficient of variation
+        patch = 16
+        local_vars = []
+        for y in range(0, h - patch, patch):
+            for x in range(0, w - patch, patch):
+                local_vars.append(float(np.var(gray[y:y+patch, x:x+patch])))
+
+        lv_cv = float(np.std(local_vars) / max(np.mean(local_vars), 1)) if local_vars else 0.5
+
+        ai_contribution = 0.0
+        fft_signals = []
+        fft_human = []
+
+        # Low residual std = unnaturally smooth = AI signal
+        if residual_std < 15:
+            ai_contribution += 0.20
+            fft_signals.append(f"Very low high-frequency noise ({residual_std:.1f}) — AI images lack natural camera sensor noise")
+        elif residual_std < 25:
+            ai_contribution += 0.10
+            fft_signals.append(f"Below-average high-frequency noise ({residual_std:.1f}) — possible AI smoothing")
+        else:
+            fft_human.append(f"Natural high-frequency sensor noise ({residual_std:.1f}) — consistent with real camera photograph")
+            ai_contribution -= 0.10
+
+        # Kurtosis discrimination
+        # Real photos: 3-15 (near-Gaussian sensor noise)
+        # AI art: 15-60 (spiky noise from generation artifacts)
+        # Screenshots/diagrams: >60 (text edges create extreme spikes)
+        if 15 < kurtosis < 60:
+            ai_contribution += 0.10
+            fft_signals.append(f"Frequency noise pattern typical of AI generation (kurtosis: {kurtosis:.1f})")
+        elif kurtosis > 60:
+            # This is screenshot/diagram territory — handled by screenshot detector
+            pass
+        else:
+            fft_human.append(f"Natural noise distribution (kurtosis: {kurtosis:.1f}) — consistent with camera sensor")
+
+        return {
+            "available": True,
+            "residual_std": round(residual_std, 2),
+            "noise_kurtosis": round(kurtosis, 2),
+            "local_variance_cv": round(lv_cv, 3),
+            "ai_contribution": round(max(0, min(0.4, ai_contribution)), 3),
+            "fft_ai_signals": fft_signals,
+            "fft_human_signals": fft_human,
+        }
+
+    except Exception as e:
+        return {"available": False, "error": str(e)[:80]}
+
+
 def analyse_regions(img_rgb) -> dict:
     """
     Divide image into regions and analyse each independently.
@@ -742,6 +856,108 @@ def analyse_noise_pattern(img_rgb) -> dict:
         return {"error": str(e)[:50]}
 
 
+# Known AI tool watermark colors and positions
+AI_WATERMARK_LOGOS = {
+    "Grok": {"color_range": [(180, 180, 180), (255, 255, 255)], "position": "bottom_right"},
+    "Midjourney": {"color_range": [(200, 200, 200), (255, 255, 255)], "position": "bottom"},
+    "Adobe Firefly": {"color_range": [(255, 0, 0), (255, 100, 100)], "position": "bottom_right"},
+    "DALL-E": {"color_range": [(0, 0, 0), (50, 50, 50)], "position": "bottom"},
+}
+
+def detect_ai_watermark(img_rgb) -> dict:
+    """
+    Detect visible AI tool watermarks in image corners.
+    Checks for known logo patterns from Grok, Midjourney, DALL-E etc.
+    Also checks for suspicious corner regions with high contrast logos.
+    """
+    try:
+        width, height = img_rgb.size
+        
+        # Define corner regions to check (10% of image dimensions)
+        margin_w = max(50, width // 8)
+        margin_h = max(30, height // 8)
+        
+        corners = {
+            "bottom_right": img_rgb.crop((width - margin_w, height - margin_h, width, height)),
+            "bottom_left": img_rgb.crop((0, height - margin_h, margin_w, height)),
+            "top_right": img_rgb.crop((width - margin_w, 0, width, margin_h)),
+            "top_left": img_rgb.crop((0, 0, margin_w, margin_h)),
+            "bottom_center": img_rgb.crop((width//3, height - margin_h, 2*width//3, height)),
+        }
+        
+        watermark_signals = []
+        found_watermark = None
+        
+        for corner_name, corner_img in corners.items():
+            pixels = list(corner_img.getdata())
+            if not pixels:
+                continue
+            
+            r_vals = [p[0] for p in pixels]
+            g_vals = [p[1] for p in pixels]
+            b_vals = [p[2] for p in pixels]
+            
+            avg_r = sum(r_vals) / len(r_vals)
+            avg_g = sum(g_vals) / len(g_vals)
+            avg_b = sum(b_vals) / len(b_vals)
+            
+            # Check for white/light logo on dark background (Grok style)
+            # or dark logo on light background
+            r_range = max(r_vals) - min(r_vals)
+            g_range = max(g_vals) - min(g_vals)
+            b_range = max(b_vals) - min(b_vals)
+            max_range = max(r_range, g_range, b_range)
+            
+            # High contrast in a small corner = possible watermark/logo
+            if max_range > 150 and corner_name in ["bottom_right", "bottom_left", "bottom_center"]:
+                # Check for near-white pixels (typical watermark)
+                white_pixels = sum(1 for p in pixels if p[0] > 200 and p[1] > 200 and p[2] > 200)
+                white_ratio = white_pixels / len(pixels)
+                
+                # Check for near-black pixels (dark watermark)
+                black_pixels = sum(1 for p in pixels if p[0] < 50 and p[1] < 50 and p[2] < 50)
+                black_ratio = black_pixels / len(pixels)
+                
+                # Watermark signature: mix of very light and very dark pixels
+                # in a small corner region
+                if 0.05 < white_ratio < 0.4 and black_ratio < 0.3:
+                    watermark_signals.append(f"Possible watermark detected in {corner_name.replace('_', ' ')} (contrast: {max_range}, white pixels: {white_ratio:.0%})")
+                    if not found_watermark:
+                        found_watermark = corner_name
+
+            # Check for Grok-specific: circular logo (white circle outline on dark)
+            # Grok watermark is typically white text/logo on semi-transparent dark bg
+            if corner_name == "bottom_right":
+                # Look for the characteristic Grok grey/white logo pattern
+                grey_pixels = sum(1 for p in pixels if 150 < p[0] < 255 and 150 < p[1] < 255 and 150 < p[2] < 255)
+                grey_ratio = grey_pixels / len(pixels)
+                bg_pixels = sum(1 for p in pixels if p[0] < 100 and p[1] < 100 and p[2] < 100)
+                bg_ratio = bg_pixels / len(pixels)
+                
+                if 0.1 < grey_ratio < 0.5 and bg_ratio > 0.1:
+                    watermark_signals.append("AI tool logo pattern detected in bottom-right corner — consistent with Grok, Midjourney or similar AI image generator watermark")
+                    found_watermark = "bottom_right_logo"
+
+        # Also check for suspiciously uniform bottom strip (added watermark bar)
+        bottom_strip = img_rgb.crop((0, height - 30, width, height))
+        strip_pixels = list(bottom_strip.getdata())
+        if strip_pixels:
+            strip_r = [p[0] for p in strip_pixels]
+            strip_std = (sum((v - sum(strip_r)/len(strip_r))**2 for v in strip_r) / len(strip_r)) ** 0.5
+            if strip_std < 15:  # very uniform bottom strip = watermark bar
+                watermark_signals.append(f"Uniform bottom strip detected (std: {strip_std:.1f}) — may indicate added watermark bar")
+
+        return {
+            "watermark_detected": len(watermark_signals) > 0,
+            "watermark_location": found_watermark,
+            "watermark_signals": watermark_signals,
+            "corners_checked": list(corners.keys()),
+        }
+
+    except Exception as e:
+        return {"watermark_detected": False, "error": str(e)[:60]}
+
+
 def analyse_image(content: bytes) -> dict:
     """Analyse image for AI generation signals."""
     signals = {}
@@ -810,6 +1026,17 @@ def analyse_image(content: bytes) -> dict:
     # very low color variance — do NOT classify as AI generated
     file_size_kb = len(content) / 1024
     signals["file_size_kb"] = round(file_size_kb, 1)
+
+    # ── 1c. Watermark detection ───────────────────────────────────────────────
+    try:
+        img_rgb_wm = img.convert("RGB")
+        wm_result = detect_ai_watermark(img_rgb_wm)
+        signals["watermark_check"] = wm_result
+        if wm_result.get("watermark_detected"):
+            for sig in wm_result.get("watermark_signals", []):
+                ai_indicators.append(f"🔍 Watermark: {sig}")
+    except Exception as e:
+        signals["watermark_error"] = str(e)[:50]
 
     # ── 2. Image statistics ───────────────────────────────────────────────────
     try:
@@ -882,6 +1109,20 @@ def analyse_image(content: bytes) -> dict:
         elif noise_data.get("avg_patch_noise", 0) > 12:
             human_indicators.append(f"Natural camera sensor noise detected (avg: {noise_data.get('avg_patch_noise', 0)}) — consistent with real photograph")
 
+        # ── Frequency domain analysis (FFT) ───────────────────────────────────
+        fft_data = fft_frequency_analysis(img_rgb)
+        signals["fft_analysis"] = {
+            "residual_std": fft_data.get("residual_std"),
+            "noise_kurtosis": fft_data.get("noise_kurtosis"),
+            "ai_contribution": fft_data.get("ai_contribution", 0),
+        }
+
+        if fft_data.get("available"):
+            for sig in fft_data.get("fft_ai_signals", []):
+                ai_indicators.append(sig)
+            for sig in fft_data.get("fft_human_signals", []):
+                human_indicators.append(sig)
+
     except Exception as e:
         signals["pixel_analysis_error"] = str(e)
 
@@ -938,26 +1179,39 @@ def analyse_image(content: bytes) -> dict:
             "signals": signals,
         }
 
+    # Incorporate FFT frequency analysis contribution
+    fft_contribution = signals.get("fft_analysis", {}).get("ai_contribution", 0)
+    fft_adjusted_ai = ai_score + (fft_contribution * 2)  # scale to indicator count
+
+    # Check watermark result
+    wm_detected = signals.get("watermark_check", {}).get("watermark_detected", False)
+
     if has_ai_software_tag:
         label = "ai_generated"
         confidence = 95
         explanation = f"AI generation tool detected in image metadata. {'; '.join(ai_indicators)}"
-    elif total == 0:
+    elif wm_detected:
+        label = "ai_generated"
+        confidence = 88
+        wm_sigs = signals.get("watermark_check", {}).get("watermark_signals", [])
+        explanation = f"AI tool watermark detected. {wm_sigs[0] if wm_sigs else ''}. Note: if watermark has been removed from the original, this image may still be AI-generated."
+    elif total == 0 and fft_contribution < 0.1:
         label = "unknown"
         confidence = 50
         explanation = "Insufficient signals to classify this image reliably."
-    elif ai_score > human_score * 1.5:
+    elif fft_adjusted_ai > human_score * 1.5 or (fft_contribution >= 0.15 and ai_score >= human_score):
         label = "ai_generated"
-        confidence = min(90, 55 + ai_score * 8)
-        explanation = f"Multiple AI generation signals detected: {'; '.join(ai_indicators)}"
-    elif human_score > ai_score:
+        confidence = min(92, 55 + int(fft_adjusted_ai * 8) + int(fft_contribution * 20))
+        fft_note = f" Frequency analysis: low sensor noise detected." if fft_contribution > 0.1 else ""
+        explanation = f"Multiple AI generation signals detected: {'; '.join(ai_indicators)}.{fft_note}"
+    elif human_score > fft_adjusted_ai:
         label = "human_captured"
-        confidence = min(85, 55 + human_score * 10)
+        confidence = min(88, 55 + human_score * 10)
         explanation = f"Photograph characteristics detected: {'; '.join(human_indicators)}"
     else:
         label = "uncertain"
         confidence = 50
-        explanation = f"Mixed signals. AI: {'; '.join(ai_indicators)}. Human: {'; '.join(human_indicators)}"
+        explanation = f"Mixed signals. AI indicators: {'; '.join(ai_indicators) if ai_indicators else 'none'}. Human indicators: {'; '.join(human_indicators) if human_indicators else 'none'}."
 
     return {
         "label": label,

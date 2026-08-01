@@ -672,6 +672,14 @@ function renderImageResult(data, targetId) {
   const sig = data.signals || {};
   let sigHtml = '';
   if (sig.dimensions) sigHtml += `<div class="signal-item"><div class="signal-name">Dimensions</div><div class="signal-value" style="font-size:14px">${sig.dimensions}</div></div>`;
+  // Watermark info
+  const wm = sig.watermark_check || {};
+  if (wm.watermark_detected) {
+    sigHtml += `<div class="signal-item" style="border:1px solid rgba(238,155,0,0.4);background:rgba(238,155,0,0.05);">
+      <div class="signal-name" style="color:#EE9B00;">⚠️ Watermark</div>
+      <div class="signal-value" style="font-size:12px;color:#EE9B00;">Detected</div>
+    </div>`;
+  }
   if (sig.format) sigHtml += `<div class="signal-item"><div class="signal-name">Format</div><div class="signal-value" style="font-size:14px">${sig.format}</div></div>`;
   if (sig.avg_channel_std) sigHtml += `<div class="signal-item"><div class="signal-name">Color Variance</div><div class="signal-value">${sig.avg_channel_std}</div></div>`;
   if (sig.has_camera_exif !== undefined) sigHtml += `<div class="signal-item"><div class="signal-name">Camera EXIF</div><div class="signal-value" style="font-size:14px">${sig.has_camera_exif ? '✅ Yes' : '❌ No'}</div></div>`;
