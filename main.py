@@ -414,21 +414,30 @@ def analyse_text(text: str) -> dict:
     # Creative writing AI detection
     if creative.get("is_creative"):
         cw_ai_score = 0.0
-        # No dialogue in fiction = AI signal (human writers use dialogue)
+        # For creative writing, use a separate base score
+        # AI fiction has low hedge words but high plot efficiency
+        # Reset hedge word advantage — not applicable to creative writing
+        hedge_boost = min(1.0, hedge * 15) * 0.30
+        cw_ai_score -= hedge_boost * 0.5  # reduce hedge word penalty for fiction
+
+        # No dialogue in fiction = strong AI signal
         if not creative["has_dialogue"]:
-            cw_ai_score += 0.15
+            cw_ai_score += 0.20
         # High symbolic density = AI signal
         if creative["symbol_density"] > 0.03:
-            cw_ai_score += creative["symbol_density"] * 3
+            cw_ai_score += creative["symbol_density"] * 4
         # High narrative efficiency = AI signal
         if creative["efficiency_density"] > 0.3:
-            cw_ai_score += creative["efficiency_density"] * 0.2
+            cw_ai_score += creative["efficiency_density"] * 0.3
         # Perfect irony structure = AI signal
         if creative["has_irony_structure"]:
-            cw_ai_score += 0.12
-        # High plot density = AI signal (too many events per sentence)
-        if creative["plot_density"] > 1.5:
-            cw_ai_score += 0.08
+            cw_ai_score += 0.15
+        # High plot density = AI signal
+        if creative["plot_density"] > 0.4:
+            cw_ai_score += 0.10
+        # Compact summary style — many plot events, short word count
+        if creative["plot_density"] > 0.3 and not creative["has_dialogue"]:
+            cw_ai_score += 0.10  # compound signal
         ai_probability = min(1.0, ai_probability + cw_ai_score)
 
     # Professional first-person narrative — LinkedIn/proposal/bio style
