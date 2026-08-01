@@ -620,6 +620,128 @@ def check_c2pa(content: bytes, mime_type: str = "image/png") -> dict:
         }
 
 
+def analyse_regions(img_rgb) -> dict:
+    """
+    Divide image into regions and analyse each independently.
+    AI images have unnaturally uniform texture in specific regions.
+    Real photos have natural sensor noise and texture variance.
+    """
+    width, height = img_rgb.size
+    results = {}
+
+    # Define regions
+    regions = {
+        "center": (width//4, height//4, 3*width//4, 3*height//4),
+        "top": (0, 0, width, height//3),
+        "bottom": (0, 2*height//3, width, height),
+        "left": (0, 0, width//3, height),
+        "right": (2*width//3, 0, width, height),
+    }
+
+    region_stds = []
+    region_vars = []
+
+    for name, box in regions.items():
+        try:
+            region = img_rgb.crop(box)
+            pixels = list(region.getdata())
+            if not pixels:
+                continue
+
+            sample = pixels[::max(1, len(pixels)//2000)]
+            r_vals = [p[0] for p in sample]
+            g_vals = [p[1] for p in sample]
+            b_vals = [p[2] for p in sample]
+
+            def std(vals):
+                if len(vals) < 2: return 0
+                avg = sum(vals) / len(vals)
+                return (sum((v-avg)**2 for v in vals) / len(vals)) ** 0.5
+
+            r_std = std(r_vals)
+            g_std = std(g_vals)
+            b_std = std(b_vals)
+            avg_std = (r_std + g_std + b_std) / 3
+            region_stds.append(avg_std)
+            results[name] = round(avg_std, 2)
+        except Exception:
+            pass
+
+    # Key metrics
+    if not region_stds:
+        return {"error": "Could not analyse regions"}
+
+    overall_std = sum(region_stds) / len(region_stds)
+    std_variance = (sum((s - overall_std)**2 for s in region_stds) / len(region_stds)) ** 0.5
+
+    # AI signal: very low texture variance in center (face/subject area)
+    center_std = results.get("center", overall_std)
+
+    # Natural photos have HIGH std_variance between regions
+    # AI images have more UNIFORM texture across regions
+    is_uniform = std_variance < 8.0
+
+    # Background detection — if bottom/corners are very bright (white bg removal)
+    bg_brightness = results.get("bottom", 128)
+    has_removed_bg = bg_brightness > 220 and center_std > 30
+
+    # Skin smoothness proxy — center region unusually smooth
+    is_smooth_center = center_std < 25 and overall_std > 30
+
+    return {
+        "region_stds": results,
+        "overall_texture_std": round(overall_std, 2),
+        "texture_variance_across_regions": round(std_variance, 2),
+        "is_texture_uniform": is_uniform,
+        "has_removed_background": has_removed_bg,
+        "center_smoother_than_average": is_smooth_center,
+        "center_std": round(center_std, 2),
+    }
+
+
+def analyse_noise_pattern(img_rgb) -> dict:
+    """
+    Real camera photos have sensor noise — random pixel variation.
+    AI images have artificially smooth areas with unnaturally low noise.
+    """
+    try:
+        # Convert to grayscale for noise analysis
+        gray = img_rgb.convert('L')
+        width, height = gray.size
+
+        # Sample a grid of small patches
+        patch_size = 8
+        patch_stds = []
+
+        for y in range(0, height - patch_size, patch_size * 4):
+            for x in range(0, width - patch_size, patch_size * 4):
+                patch = gray.crop((x, y, x + patch_size, y + patch_size))
+                pixels = list(patch.getdata())
+                if len(pixels) < 4:
+                    continue
+                avg = sum(pixels) / len(pixels)
+                std = (sum((p - avg)**2 for p in pixels) / len(pixels)) ** 0.5
+                patch_stds.append(std)
+
+        if not patch_stds:
+            return {}
+
+        avg_patch_std = sum(patch_stds) / len(patch_stds)
+        # Very low patch std = unnaturally smooth = AI signal
+        very_smooth_patches = sum(1 for s in patch_stds if s < 3.0) / len(patch_stds)
+        # High variation in patch stds = natural photo noise
+        patch_std_variance = (sum((s - avg_patch_std)**2 for s in patch_stds) / len(patch_stds)) ** 0.5
+
+        return {
+            "avg_patch_noise": round(avg_patch_std, 3),
+            "smooth_patch_ratio": round(very_smooth_patches, 3),
+            "noise_variance": round(patch_std_variance, 3),
+            "is_unnaturally_smooth": avg_patch_std < 8.0 and very_smooth_patches > 0.3,
+        }
+    except Exception as e:
+        return {"error": str(e)[:50]}
+
+
 def analyse_image(content: bytes) -> dict:
     """Analyse image for AI generation signals."""
     signals = {}
@@ -736,6 +858,29 @@ def analyse_image(content: bytes) -> dict:
             human_indicators.append(f"High color variance ({avg_std:.1f}) — natural photograph characteristic")
         elif avg_std < 35:
             ai_indicators.append(f"Low color variance ({avg_std:.1f}) — smooth gradients typical of AI generation")
+
+        # ── Region analysis ───────────────────────────────────────────────────
+        region_data = analyse_regions(img_rgb)
+        signals["region_analysis"] = region_data
+
+        if region_data.get("has_removed_background"):
+            human_indicators.append("Background removal detected — real photo with background edited out")
+            signals["background_removed"] = True
+
+        if region_data.get("is_texture_uniform"):
+            ai_indicators.append(f"Unnaturally uniform texture across image regions (variance: {region_data.get('texture_variance_across_regions', 0)}) — typical of AI generation")
+
+        if region_data.get("center_smoother_than_average"):
+            ai_indicators.append(f"Center region unusually smooth (std: {region_data.get('center_std', 0)}) — possible AI portrait skin smoothing")
+
+        # ── Noise pattern analysis ────────────────────────────────────────────
+        noise_data = analyse_noise_pattern(img_rgb)
+        signals["noise_analysis"] = noise_data
+
+        if noise_data.get("is_unnaturally_smooth"):
+            ai_indicators.append(f"Unnaturally low pixel noise (avg: {noise_data.get('avg_patch_noise', 0)}, smooth patches: {noise_data.get('smooth_patch_ratio', 0)*100:.0f}%) — AI images lack natural camera sensor noise")
+        elif noise_data.get("avg_patch_noise", 0) > 12:
+            human_indicators.append(f"Natural camera sensor noise detected (avg: {noise_data.get('avg_patch_noise', 0)}) — consistent with real photograph")
 
     except Exception as e:
         signals["pixel_analysis_error"] = str(e)
