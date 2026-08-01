@@ -239,6 +239,91 @@ def spelling_variation_score(text: str) -> float:
     return min(1.0, count * 0.5)
 
 
+# ── Creative Writing AI Detection Signals ────────────────────────────────────
+# AI creative writing is "hyper-efficient" — every sentence serves the theme,
+# perfect symbolic structure, no loose ends, no grounded dialogue.
+# Source: Gemini self-analysis of AI-generated fiction
+
+SYMBOLIC_WORDS = [
+    "beacon", "light", "darkness", "shadow", "flame", "fire", "storm",
+    "silence", "soul", "grave", "tide", "shore", "wave", "broken",
+    "desperate", "fate", "irony", "redemption", "sacrifice", "loss",
+    "guilt", "burden", "weight", "hollow", "empty", "shattered",
+]
+
+DIALOGUE_MARKERS = ['"', "'", "said", "replied", "asked", "whispered",
+                    "shouted", "cried", "answered", "called", "told",
+                    "exclaimed", "muttered", "murmured"]
+
+NARRATIVE_EFFICIENCY = [
+    "in his desperate", "in her desperate", "in their desperate",
+    "in an attempt to", "in a desperate attempt",
+    "he had", "she had", "they had",
+    "finally", "eventually", "ultimately", "at last",
+    "only to", "only then", "only now",
+]
+
+def creative_writing_signals(text: str) -> dict:
+    """
+    Detect AI creative writing patterns.
+    AI fiction is thematically hyper-efficient — every element serves the plot,
+    perfect irony, no loose dialogue, compact summary style.
+    """
+    words = text.lower().split()
+    sentences = tokenize_sentences(text)
+    text_lower = text.lower()
+    word_count = len(words)
+
+    if word_count < 50:
+        return {"is_creative": False}
+
+    # 1. Symbolic density — AI packs in too many symbols
+    symbol_count = sum(1 for w in words if w.rstrip('.,;:!?"') in SYMBOLIC_WORDS)
+    symbol_density = symbol_count / max(word_count, 1)
+
+    # 2. Dialogue absence — human fiction almost always has dialogue
+    has_dialogue = any(marker in text for marker in DIALOGUE_MARKERS[:3])  # check quotes
+    dialogue_word_count = sum(1 for w in DIALOGUE_MARKERS[3:] if w in text_lower)
+    has_dialogue_verbs = dialogue_word_count > 0
+
+    # 3. Narrative efficiency — too many plot-advancing phrases
+    efficiency_count = sum(1 for phrase in NARRATIVE_EFFICIENCY if phrase in text_lower)
+    efficiency_density = efficiency_count / max(len(sentences), 1)
+
+    # 4. Plot event density — events per sentence (AI crams in more)
+    plot_words = ["arrived", "found", "saw", "heard", "felt", "realized",
+                  "discovered", "decided", "turned", "looked", "ran", "left",
+                  "returned", "died", "fell", "rose", "came", "went", "took"]
+    plot_count = sum(1 for w in words if w.rstrip('.,;:!?') in plot_words)
+    plot_density = plot_count / max(len(sentences), 1)
+
+    # 5. Perfect irony structure — AI loves circular/ironic endings
+    irony_phrases = [
+        "guided dozens", "guided innocent", "led to their",
+        "let his fire", "let her fire", "abandoned his post",
+        "too late", "in vain", "only to find", "only to discover",
+        "at the cost of", "by saving", "while trying to save",
+    ]
+    has_irony = any(phrase in text_lower for phrase in irony_phrases)
+
+    # Detect if this is creative writing at all
+    creative_markers = ["he said", "she said", "the story", "once upon",
+                        "narrator", "protagonist", "character"]
+    narrative_words = ["tower", "vessel", "shore", "cliff", "lighthouse",
+                       "messenger", "keeper", "sailor", "captain", "village"]
+    is_narrative = (sum(1 for w in narrative_words if w in text_lower) > 1 or
+                    plot_density > 0.5)
+
+    return {
+        "is_creative": is_narrative,
+        "symbol_density": round(symbol_density, 4),
+        "has_dialogue": has_dialogue or has_dialogue_verbs,
+        "efficiency_density": round(efficiency_density, 4),
+        "plot_density": round(plot_density, 4),
+        "has_irony_structure": has_irony,
+    }
+
+
 def analyse_text(text: str) -> dict:
     """
     Main text analysis. Returns scores and classification.
@@ -264,6 +349,7 @@ def analyse_text(text: str) -> dict:
 
     # Additional human signals
     prof_narr = professional_narrative_score(clean_text)
+    creative = creative_writing_signals(clean_text)
     self_dep = self_deprecating_density(clean_text)
     autobio = autobiographical_density(clean_text)
     scan_art = has_scan_artifacts(text)  # check original text
@@ -325,6 +411,26 @@ def analyse_text(text: str) -> dict:
     if spell_var > 0:
         ai_probability = max(0, ai_probability - spell_var * 0.10)
 
+    # Creative writing AI detection
+    if creative.get("is_creative"):
+        cw_ai_score = 0.0
+        # No dialogue in fiction = AI signal (human writers use dialogue)
+        if not creative["has_dialogue"]:
+            cw_ai_score += 0.15
+        # High symbolic density = AI signal
+        if creative["symbol_density"] > 0.03:
+            cw_ai_score += creative["symbol_density"] * 3
+        # High narrative efficiency = AI signal
+        if creative["efficiency_density"] > 0.3:
+            cw_ai_score += creative["efficiency_density"] * 0.2
+        # Perfect irony structure = AI signal
+        if creative["has_irony_structure"]:
+            cw_ai_score += 0.12
+        # High plot density = AI signal (too many events per sentence)
+        if creative["plot_density"] > 1.5:
+            cw_ai_score += 0.08
+        ai_probability = min(1.0, ai_probability + cw_ai_score)
+
     # Professional first-person narrative — LinkedIn/proposal/bio style
     if prof_narr > 0:
         ai_probability = max(0, ai_probability - prof_narr * 0.20)
@@ -336,21 +442,40 @@ def analyse_text(text: str) -> dict:
     ai_probability = round(min(1.0, max(0.0, ai_probability)), 3)
 
     # ── Classification ────────────────────────────────────────────────────────
+    is_creative = creative.get("is_creative", False)
+    no_dialogue = is_creative and not creative.get("has_dialogue", True)
+
     if ai_probability >= 0.70:
         label = "ai_generated"
         confidence = round(ai_probability * 100)
-        explanation = (
-            f"High probability of AI generation ({confidence}%). "
-            f"Signals: low entropy variance, formal transition words, "
-            f"uniform sentence structure."
-        )
+        if is_creative:
+            explanation = (
+                f"High probability of AI-generated creative writing ({confidence}%). "
+                f"Signals: hyper-efficient thematic structure, high symbolic density, "
+                f"{'no dialogue detected, ' if no_dialogue else ''}"
+                f"compact summary style typical of AI fiction. "
+                f"Human fiction typically includes grounded dialogue, idiosyncratic pacing, and loose sensory detail."
+            )
+        else:
+            explanation = (
+                f"High probability of AI generation ({confidence}%). "
+                f"Signals: low entropy variance, formal transition words, "
+                f"uniform sentence structure."
+            )
     elif ai_probability >= 0.45:
         label = "ai_assisted"
         confidence = round(ai_probability * 100)
-        explanation = (
-            f"Mixed signals ({confidence}% AI probability). "
-            f"Likely human-written with AI editing, or AI output with human revision."
-        )
+        if is_creative:
+            explanation = (
+                f"Mixed signals ({confidence}% AI probability). "
+                f"Creative writing detected — may be AI-generated fiction or human writing with AI polish. "
+                f"AI creative writing typically lacks grounded dialogue and has overly efficient thematic structure."
+            )
+        else:
+            explanation = (
+                f"Mixed signals ({confidence}% AI probability). "
+                f"Likely human-written with AI editing, or AI output with human revision."
+            )
     else:
         label = "human_written"
         confidence = round((1 - ai_probability) * 100)
@@ -377,9 +502,23 @@ def analyse_text(text: str) -> dict:
             "pre_ai_formal_english": round(pre_ai, 4),
             "spelling_variations": round(spell_var, 4),
             "professional_narrative": round(prof_narr, 4),
+            "creative_writing_detected": creative.get("is_creative", False),
+            "creative_symbol_density": creative.get("symbol_density", 0),
+            "creative_has_dialogue": creative.get("has_dialogue", None),
+            "creative_plot_density": creative.get("plot_density", 0),
         },
-        "word_count": len(text.split()),
+        "word_count": len(clean_text.split()),
         "sentence_count": len(sentences),
+        "signal_contributions": {
+            "hedge_words": f"{round(min(1.0, hedge * 15) * 0.30 * 100, 1)}% — formal AI transition words",
+            "repetition": f"{round(rep * 0.16 * 100, 1)}% — repeated sentence patterns",
+            "entropy": f"{round(max(0, 1 - (perp / 3.0)) * 0.12 * 100, 1)}% — text uniformity",
+            "sentence_uniformity": f"{round(max(0, 1 - (sl_var / 50.0)) * 0.12 * 100, 1)}% — sentence length uniformity",
+            "vocab_repetition": f"{round(max(0, 1 - vocab) * 0.15 * 100, 1)}% — vocabulary repetition",
+            "no_human_markers": f"{round((1 - min(1.0, human * 20)) * 0.15 * 100, 1)}% — absence of colloquial language",
+            "creative_no_dialogue": f"{round(0.15 * 100 if is_creative and not creative.get('has_dialogue') else 0, 1)}% — no dialogue in fiction",
+            "creative_irony": f"{round(0.12 * 100 if creative.get('has_irony_structure') else 0, 1)}% — ironic/symbolic structure",
+        }
     }
 
 

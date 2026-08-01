@@ -584,6 +584,31 @@ function renderResult(data, targetId) {
   const textForSciSpace = document.getElementById('text-input') ? 
     encodeURIComponent(document.getElementById('text-input').value.trim().substring(0, 500)) : '';
 
+  // Build signal contributions HTML
+  let contribHtml = '';
+  if (data.signal_contributions && Object.keys(data.signal_contributions).length > 0) {
+    const contribs = Object.entries(data.signal_contributions)
+      .filter(([k,v]) => parseFloat(v) > 0)
+      .sort((a,b) => parseFloat(b[1]) - parseFloat(a[1]));
+    if (contribs.length > 0) {
+      const rows = contribs.map(([k,v]) => {
+        const pct = parseFloat(v);
+        const desc = v.split('% — ')[1] || '';
+        return `<div style="margin-bottom:6px;">
+          <div style="display:flex;justify-content:space-between;font-size:12px;color:#94D2BD;margin-bottom:2px;">
+            <span>${desc}</span><span>${pct.toFixed(1)}%</span>
+          </div>
+          <div style="height:4px;background:#1e3a5f;border-radius:2px;">
+            <div style="height:4px;background:#EE9B00;border-radius:2px;width:${Math.min(100,pct*3)}%;"></div>
+          </div>
+        </div>`;
+      }).join('');
+      contribHtml = `<div class="card"><h2>What Drove the AI Score</h2>${rows}
+        <p style="font-size:11px;color:#64748b;margin-top:8px;">Each bar shows how much that signal contributed to the AI probability score.</p>
+      </div>`;
+    }
+  }
+
   el.innerHTML = `
     <div class="card">
       ${metaHtml ? `<div class="meta">${metaHtml}</div>` : ''}
@@ -700,6 +725,9 @@ function renderImageResult(data, targetId) {
       </div>
       <div class="explanation">${data.explanation || ''}</div>
       ${indicatorsHtml ? `<div class="indicators">${indicatorsHtml}</div>` : ''}
+      <div style="font-size:11px;color:#64748b;margin-top:8px;padding:8px;background:#0f1117;border-radius:6px;">
+        ℹ️ Whole-image analysis only — cannot determine which elements within the image are AI vs human. Images shared via WhatsApp or social media may have camera metadata stripped, affecting accuracy.
+      </div>
     </div>
     ${complianceHtml}
     ${sigHtml ? `<div class="card"><h2>Image Signals</h2><div class="signals-grid">${sigHtml}</div></div>` : ''}`;
