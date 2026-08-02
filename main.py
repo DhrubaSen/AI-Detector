@@ -89,9 +89,27 @@ HUMAN_MARKERS = {
 
 
 def tokenize_sentences(text: str) -> list[str]:
-    """Simple sentence splitter."""
+    """
+    Smart sentence splitter.
+    For poetry (many short lines, little punctuation) uses line breaks.
+    For prose uses punctuation.
+    """
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+    avg_line_len = sum(len(l.split()) for l in lines) / max(len(lines), 1) if lines else 20
+
+    # Poetry mode: short lines, use each line as a unit
+    if avg_line_len < 7 and len(lines) >= 4:
+        return [l for l in lines if len(l) > 2]
+
+    # Prose mode: split on sentence-ending punctuation
     sentences = re.split(r'(?<=[.!?])\s+', text.strip())
-    return [s.strip() for s in sentences if len(s.strip()) > 10]
+    result = [s.strip() for s in sentences if len(s.strip()) > 10]
+
+    # Fallback: if only 1 sentence detected but many lines, use lines
+    if len(result) <= 1 and len(lines) >= 4:
+        return [l for l in lines if len(l) > 2]
+
+    return result
 
 
 def compute_perplexity_proxy(text: str) -> float:
@@ -298,6 +316,85 @@ NARRATIVE_EFFICIENCY = [
     "only to", "only then", "only now",
 ]
 
+def is_poetry(text: str) -> dict:
+    """
+    Detect poetry — short lines, repetition as literary device,
+    rhetorical questions, sensory imagery, line breaks mid-sentence.
+    Human poetry should NOT be penalised for low entropy or repetition.
+    """
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+    if len(lines) < 3:
+        return {"is_poetry": False}
+
+    # Short average line length = poetry signal
+    avg_line_len = sum(len(l.split()) for l in lines) / len(lines)
+    is_short_lines = avg_line_len < 8
+
+    # Many lines relative to word count
+    words = text.split()
+    line_to_word_ratio = len(lines) / max(len(words), 1)
+    is_high_line_ratio = line_to_word_ratio > 0.15
+
+    # Rhetorical questions
+    question_count = text.count("?")
+    has_rhetorical = question_count >= 1
+
+    # Sensory/imagistic language
+    sensory_words = [
+        "rain", "light", "dark", "wet", "dry", "cold", "warm", "bright",
+        "soft", "hard", "silence", "sound", "wind", "sun", "moon", "sky",
+        "water", "stone", "leaf", "leaves", "air", "earth", "fire", "sea",
+        "snow", "shadow", "gleam", "shine", "shining", "glow", "pale",
+        "white", "black", "red", "golden", "silver", "blue", "green",
+    ]
+    # Abstract/philosophical vocabulary common in minimalist poetry
+    abstract_poetry_words = [
+        "soul", "nothing", "everything", "silence", "void", "empty",
+        "small", "final", "last", "alone", "still", "only", "least",
+        "made", "pray", "prays", "enter", "become", "remain", "wait",
+        "song", "voice", "breath", "heart", "hand", "eye", "face",
+        "man", "woman", "child", "god", "death", "life", "time", "world",
+        "flute", "lays", "explained",
+    ]
+    text_lower = text.lower()
+    sensory_count = sum(1 for w in sensory_words if w in text_lower)
+    abstract_count = sum(1 for w in abstract_poetry_words if w in text_lower)
+    is_imagistic = sensory_count >= 2 or abstract_count >= 3
+
+    # Repetition in poetry is intentional — check for exact phrase repeat
+    # (e.g. "Did no one see it" appearing twice)
+    from collections import Counter
+    phrase_counts = Counter()
+    for i in range(len(lines) - 1):
+        for j in range(i+1, len(lines)):
+            if lines[i].lower().strip(".,?!") == lines[j].lower().strip(".,?!"):
+                phrase_counts[lines[i]] += 1
+    has_poetic_repetition = len(phrase_counts) > 0
+
+    # Final poetry determination
+    poetry_score = sum([
+        is_short_lines,
+        is_high_line_ratio,
+        has_rhetorical,
+        is_imagistic,
+        has_poetic_repetition,
+    ])
+
+    # Very short lines + high line ratio alone = strong poetry signal
+    # even without other markers (minimalist poetry)
+    is_minimalist = is_short_lines and is_high_line_ratio and avg_line_len < 5
+
+    return {
+        "is_poetry": poetry_score >= 2 or is_minimalist,
+        "poetry_score": poetry_score,
+        "avg_line_length": round(avg_line_len, 1),
+        "has_rhetorical_questions": has_rhetorical,
+        "has_sensory_imagery": is_imagistic,
+        "has_poetic_repetition": has_poetic_repetition,
+        "sensory_count": sensory_count,
+    }
+
+
 def creative_writing_signals(text: str) -> dict:
     """
     Detect AI creative writing patterns.
@@ -385,6 +482,7 @@ def analyse_text(text: str) -> dict:
     # Additional human signals
     prof_narr = professional_narrative_score(clean_text)
     creative = creative_writing_signals(clean_text)
+    poetry = is_poetry(clean_text)
     self_dep = self_deprecating_density(clean_text)
     autobio = autobiographical_density(clean_text)
     scan_art = has_scan_artifacts(text)  # check original text
@@ -475,6 +573,21 @@ def analyse_text(text: str) -> dict:
             cw_ai_score += 0.10  # compound signal
         ai_probability = min(1.0, ai_probability + cw_ai_score)
 
+    # Poetry — short lines, repetition as literary device, sensory imagery
+    if poetry.get("is_poetry"):
+        # Neutralise low entropy penalty — poetry has uniform short lines
+        perp_penalty = max(0, 1 - (perp / 3.0)) * 0.12
+        ai_probability = max(0, ai_probability - perp_penalty)
+        # Neutralise repetition penalty — poetic repetition is intentional
+        if poetry.get("has_poetic_repetition"):
+            ai_probability = max(0, ai_probability - rep * 0.16)
+        # Sensory imagery = human signal
+        if poetry.get("has_sensory_imagery"):
+            ai_probability = max(0, ai_probability - 0.15)
+        # Rhetorical questions = human signal
+        if poetry.get("has_rhetorical_questions"):
+            ai_probability = max(0, ai_probability - 0.10)
+
     # Professional first-person narrative — LinkedIn/proposal/bio style
     if prof_narr > 0:
         ai_probability = max(0, ai_probability - prof_narr * 0.20)
@@ -550,6 +663,9 @@ def analyse_text(text: str) -> dict:
             "creative_symbol_density": creative.get("symbol_density", 0),
             "creative_has_dialogue": creative.get("has_dialogue", None),
             "creative_plot_density": creative.get("plot_density", 0),
+            "poetry_detected": poetry.get("is_poetry", False),
+            "poetry_score": poetry.get("poetry_score", 0),
+            "poetry_sensory_count": poetry.get("sensory_count", 0),
         },
         "word_count": len(clean_text.split()),
         "sentence_count": len(sentences),
