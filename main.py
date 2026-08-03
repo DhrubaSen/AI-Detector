@@ -49,7 +49,19 @@ except ImportError:
     C2PA_OK = False
 
 # ── Cache ─────────────────────────────────────────────────────────────────────
-cache: dict = {}
+# Bounded FIFO cache — a plain dict here grows forever and was a memory leak.
+from collections import OrderedDict
+CACHE_MAX_ENTRIES = 500
+
+class BoundedCache(OrderedDict):
+    def __setitem__(self, key, value):
+        if key in self:
+            self.move_to_end(key)
+        super().__setitem__(key, value)
+        if len(self) > CACHE_MAX_ENTRIES:
+            self.popitem(last=False)  # evict oldest
+
+cache: dict = BoundedCache()
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 app = FastAPI(title="AI Content Detector", version="1.0.0")
@@ -1083,9 +1095,22 @@ def analyse_image(content: bytes) -> dict:
     file_size_kb = len(content) / 1024
     signals["file_size_kb"] = round(file_size_kb, 1)
 
+    # Cap the working copy used for per-pixel analysis. list(img.getdata())
+    # on a full-resolution phone photo (12MP+) materialises millions of
+    # Python tuple objects — repeated across region/noise/compositing/FFT
+    # passes this was the main driver behind Render's memory-limit restarts.
+    # Downscaling here doesn't change EXIF/format/dimension signals below,
+    # only the pixel-statistics passes, which don't need full resolution.
+    MAX_ANALYSIS_DIM = 1600
+    orig_w, orig_h = img.size
+    if max(orig_w, orig_h) > MAX_ANALYSIS_DIM:
+        analysis_src = img.convert("RGB")
+        analysis_src.thumbnail((MAX_ANALYSIS_DIM, MAX_ANALYSIS_DIM), Image.LANCZOS)
+    else:
+        analysis_src = img.convert("RGB")
+
     try:
-        img_rgb_comp = img.convert("RGB")
-        comp_result = detect_compositing(img_rgb_comp)
+        comp_result = detect_compositing(analysis_src)
         signals["compositing_check"] = comp_result
         if comp_result.get("compositing_detected"):
             ai_indicators.append(f"Edge sharpness inconsistency detected (cv: {comp_result.get('edge_cv', 0)}) — possible AI element composited into real photograph")
@@ -1093,8 +1118,7 @@ def analyse_image(content: bytes) -> dict:
         signals["compositing_error"] = str(e)[:50]
 
     try:
-        img_rgb_wm = img.convert("RGB")
-        wm_result = detect_ai_watermark(img_rgb_wm)
+        wm_result = detect_ai_watermark(analysis_src)
         signals["watermark_check"] = wm_result
         if wm_result.get("watermark_detected"):
             for sig in wm_result.get("watermark_signals", []):
@@ -1103,8 +1127,8 @@ def analyse_image(content: bytes) -> dict:
         signals["watermark_error"] = str(e)[:50]
 
     try:
-        img_rgb = img.convert("RGB")
-        width, height = img_rgb.size
+        img_rgb = analysis_src
+        width, height = orig_w, orig_h
         signals["dimensions"] = f"{width}x{height}"
         ai_dims = [(1024, 1024), (512, 512), (768, 768), (1024, 768),
                    (768, 1024), (1024, 1536), (1536, 1024), (2048, 2048)]
@@ -1112,8 +1136,13 @@ def analyse_image(content: bytes) -> dict:
             ai_indicators.append(f"Common AI generation resolution: {width}x{height}")
         elif width == height:
             ai_indicators.append(f"Square image ({width}x{height}) — common in AI generation")
-        pixels = list(img_rgb.getdata())
-        sample = pixels[::max(1, len(pixels)//10000)]
+        # Sample directly from the (already capped) analysis copy instead of
+        # materialising a full getdata() list then slicing it down.
+        aw, ah = img_rgb.size
+        step = max(1, int(((aw * ah) / 10000) ** 0.5))
+        sample = [img_rgb.getpixel((x, y))
+                  for y in range(0, ah, step)
+                  for x in range(0, aw, step)]
         r_vals = [p[0] for p in sample]
         g_vals = [p[1] for p in sample]
         b_vals = [p[2] for p in sample]
@@ -1210,30 +1239,44 @@ def analyse_image(content: bytes) -> dict:
         }
 
     fft_contribution = signals.get("fft_analysis", {}).get("ai_contribution", 0)
-    fft_adjusted_ai = ai_score + (fft_contribution * 2)
     wm_detected = signals.get("watermark_check", {}).get("watermark_detected", False)
+    # Watermark corner-matching is a weak heuristic — busy/high-contrast real
+    # photo content (bright floors, patterned surfaces, windows) can trigger
+    # the same contrast/white-pixel-ratio pattern as an actual logo. It's
+    # already counted once via ai_indicators/ai_score above, so it isn't
+    # given any extra weight here — it blends with every other signal
+    # instead of single-handedly forcing "ai_generated" regardless of what
+    # the rest of the analysis found.
+    fft_adjusted_ai = ai_score + (fft_contribution * 2)
 
     if has_ai_software_tag:
         label = "ai_generated"
         confidence = 95
         explanation = f"AI generation tool detected in image metadata. {'; '.join(ai_indicators)}"
-    elif wm_detected:
-        label = "ai_generated"
-        confidence = 88
-        wm_sigs = signals.get("watermark_check", {}).get("watermark_signals", [])
-        explanation = f"AI tool watermark detected. {wm_sigs[0] if wm_sigs else ''}. Note: if watermark has been removed from the original, this image may still be AI-generated."
     elif total == 0 and fft_contribution < 0.1:
         label = "unknown"
         confidence = 50
         explanation = "Insufficient signals to classify this image reliably."
     elif fft_adjusted_ai > human_score * 1.2 or (fft_contribution >= 0.12 and ai_score >= human_score):
         label = "ai_generated"
-        confidence = min(92, 55 + int(fft_adjusted_ai * 8) + int(fft_contribution * 20))
+        # Was a hard min(92, ...) clamp — any score past the ceiling collapsed
+        # to the identical number, so a mildly-AI image and an overwhelmingly
+        # obvious one (e.g. one with a visible generator watermark vs. the
+        # same image with it manually edited out) could read as the exact
+        # same confidence. This exponential approach-to-ceiling keeps
+        # climbing toward but never quite reaches 96, so a stronger combined
+        # signal count still produces a visibly higher number.
+        import math as _math
+        s = fft_adjusted_ai * 8 + fft_contribution * 20
+        confidence = round(55 + 41 * (1 - _math.exp(-s / 35)))
         fft_note = f" Frequency analysis: low sensor noise detected." if fft_contribution > 0.1 else ""
-        explanation = f"Multiple AI generation signals detected: {'; '.join(ai_indicators)}.{fft_note}"
+        wm_note = " Possible watermark match detected (weighted, not decisive on its own)." if wm_detected else ""
+        explanation = f"Multiple AI generation signals detected: {'; '.join(ai_indicators)}.{fft_note}{wm_note}"
     elif human_score > fft_adjusted_ai:
         label = "human_captured"
-        confidence = min(88, 55 + human_score * 10)
+        import math as _math
+        s = human_score * 10
+        confidence = round(55 + 37 * (1 - _math.exp(-s / 30)))
         explanation = f"Photograph characteristics detected: {'; '.join(human_indicators)}"
     else:
         comp_detected = signals.get("compositing_check", {}).get("compositing_detected", False)
