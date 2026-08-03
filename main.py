@@ -140,7 +140,15 @@ AI_LABELS = {"ai_generated"}
 HUMAN_LABELS = {"human_written", "human_captured", "human_created"}
 TIER_SPLIT_CONFIDENCE = 85  # within a two-sided label, split "Likely X" vs "X"
 
-def tier_for_result(label: str, confidence) -> str:
+def tier_for_result(label: str, confidence, lean: float = None) -> str:
+    """
+    lean: optional signed value already available at the call site —
+    positive means the signals lean AI, negative means they lean human,
+    None/0 means no directional evidence at all (don't fabricate a lean
+    the data doesn't support). Only used for the boundary-zone labels;
+    the two-sided labels (ai_generated / human_*) already carry their own
+    direction via the label itself.
+    """
     try:
         conf = float(confidence)
     except (TypeError, ValueError):
@@ -149,6 +157,10 @@ def tier_for_result(label: str, confidence) -> str:
         return "AI" if conf >= TIER_SPLIT_CONFIDENCE else "Likely AI"
     if label in HUMAN_LABELS:
         return "Human" if conf >= TIER_SPLIT_CONFIDENCE else "Likely Human"
+    if lean is not None and lean > 0:
+        return "AI Generated, Human Edited"
+    if lean is not None and lean < 0:
+        return "Human Written, AI Edited"
     return "Mixed"
 
 
@@ -238,7 +250,7 @@ SELF_DEPRECATING = [
 
 AUTOBIOGRAPHICAL = [
     "memory lane", "i recall", "i remember", "in those days",
-    "it was", "when i was", "years ago", "at that time",
+    "when i was", "years ago", "at that time",
     "in my experience", "i have found", "i have seen",
     "looking back", "in retrospect",
 ]
@@ -286,18 +298,43 @@ def professional_narrative_score(text: str) -> float:
 
 
 def spelling_variation_score(text: str) -> float:
+    # FIX: these were matched with plain substring search ("ive" in text),
+    # which fires inside ordinary words — "archives", "massive", "given",
+    # "lives", "drive" all contain "ive"; "thrum" contains "thru"; "single"
+    # contains "ngl"; "our " contains "ur ". A single fiction paragraph
+    # could max out this score without a single real typo or SMS-ism in it.
+    # Now matched as whole words only.
     common_variations = [
         "exhilerated", "embarassed", "wierd", "recieve", "occured",
         "seperately", "definately", "occurance", "untill",
         "dont", "cant", "wont", "ive", "youre", "theyre",
         "shud", "cud", "wud", "bcoz", "bcause", "thru",
-        "gr8", "l8r", "b4 ", "pls ", "plz", "sry ",
-        "omg", "lmao", "btw ", "imo ", "tbh ", "ngl",
-        "idk ", "fyi ", "asap", "ur ", "u r",
+        "gr8", "l8r", "b4", "pls", "plz", "sry",
+        "omg", "lmao", "btw", "imo", "tbh", "ngl",
+        "idk", "fyi", "asap", "ur",
     ]
     text_lower = text.lower()
-    count = sum(1 for v in common_variations if v in text_lower)
-    non_latin = sum(1 for c in text if ord(c) > 0x00FF)
+    words_in_text = set(re.findall(r"[a-z0-9']+", text_lower))
+    count = sum(1 for v in common_variations if v in words_in_text)
+    if re.search(r'\bu r\b', text_lower):
+        count += 1
+    # FIX: this was meant to catch genuine non-Latin script (a real human
+    # signal — e.g. text mixing in Hindi/Chinese/Arabic). But `ord(c) >
+    # 0x00FF` also catches ordinary typographic punctuation — em-dash,
+    # en-dash, curly quotes, ellipsis — purely because their Unicode
+    # codepoints happen to sit above 255, not because they indicate
+    # anything about script or language. Worse, em-dash usage is widely
+    # observed as a common AI writing tendency, so counting it as a human
+    # signal was likely backwards. Typographic punctuation is now excluded
+    # from this count entirely.
+    TYPOGRAPHIC_PUNCTUATION = {
+        "\u2014", "\u2013",  # em dash, en dash
+        "\u2018", "\u2019",  # curly single quotes
+        "\u201C", "\u201D",  # curly double quotes
+        "\u2026",            # ellipsis
+        "\u00A0",            # non-breaking space
+    }
+    non_latin = sum(1 for c in text if ord(c) > 0x00FF and c not in TYPOGRAPHIC_PUNCTUATION)
     if non_latin > 2:
         count += 2
     emoji_ranges = [(0x1F300, 0x1F9FF), (0x2600, 0x26FF), (0x2700, 0x27BF)]
@@ -483,8 +520,20 @@ def is_poetry(text: str) -> dict:
 
     is_minimalist = is_short_lines and is_high_line_ratio and avg_line_len < 5
 
+    # FIX: poetry_score >= 2 could previously be satisfied entirely by
+    # thematic/coincidental signals — rhetorical questions in dialogue,
+    # sensory-word density that any sufficiently long descriptive story
+    # accumulates, two paragraphs that happen to end in similar-sounding
+    # words, two paragraphs that happen to open with the same word — none
+    # of which require the text to actually be formatted as short verse
+    # lines. A multi-paragraph prose story (avg ~35 words/"line") could
+    # trip is_poetry=True with zero real line-structure evidence, wrongly
+    # routing it into the poetry human-bonus branch. Now requires at least
+    # one genuine line-structure signal before qualifying.
+    has_line_structure_evidence = is_short_lines or is_high_line_ratio
+
     return {
-        "is_poetry": poetry_score >= 2 or is_minimalist,
+        "is_poetry": (has_line_structure_evidence and poetry_score >= 2) or is_minimalist,
         "poetry_score": poetry_score,
         "avg_line_length": round(avg_line_len, 1),
         "has_rhetorical_questions": has_rhetorical,
@@ -556,6 +605,62 @@ def creative_writing_signals(text: str) -> dict:
     }
 
 
+def purple_prose_signals(text: str) -> dict:
+    """
+    A distinct AI-fiction tell from irony/dialogue-absence: a neatly
+    symmetrical, thematically-explicit closing beat. None of this is
+    inherently bad writing on its own, and a human author can absolutely
+    write this way — but the combination is a very recognizable, common
+    pattern in AI-generated fiction endings specifically:
+      - a simile in the closing lines linking something mechanical/
+        environmental to an abstract virtue (heart, hope, pulse)
+      - a triadic loss/but-still antithesis ("they had lost X, they had
+        lost Y, but Z")
+      - literal continuity phrasing ("still breathing/beating/alive")
+      - the story's title echoed verbatim in the closing lines
+    """
+    paragraphs = [p.strip() for p in text.split("\n") if p.strip()]
+    final_chunk = " ".join(paragraphs[-2:]) if len(paragraphs) >= 2 else text
+    final_chunk_lower = final_chunk.lower()
+
+    simile_match = bool(re.search(
+        r'\blike a\b[^.!?]{0,25}\b(heart|hope|whisper|prayer|promise|memory|dream|pulse)\b',
+        final_chunk_lower))
+
+    triadic_antithesis = bool(re.search(
+        r'(they had lost|we had lost|i had lost|had lost the)[^.!?]{0,60}(had lost)[^.!?]{0,60}\bbut\b',
+        final_chunk_lower))
+
+    still_continuity = bool(re.search(
+        r'\bstill (breathing|alive|beating|standing|burning|glowing|here)\b',
+        final_chunk_lower))
+
+    # Title echo: if the first line reads like a short title (few words,
+    # no closing sentence punctuation), check whether a distinctive
+    # two-word phrase from it reappears verbatim in the closing lines.
+    title_echo = False
+    if paragraphs:
+        first_line = paragraphs[0]
+        if len(first_line.split()) <= 6 and not first_line.rstrip().endswith((".", "!", "?")):
+            title_words = re.findall(r'[a-z]+', first_line.lower())
+            for i in range(len(title_words) - 1):
+                bigram = title_words[i] + " " + title_words[i + 1]
+                if bigram in final_chunk_lower:
+                    title_echo = True
+                    break
+
+    hit_count = sum([simile_match, triadic_antithesis, still_continuity, title_echo])
+
+    return {
+        "has_closing_simile": simile_match,
+        "has_triadic_antithesis": triadic_antithesis,
+        "has_still_continuity_phrase": still_continuity,
+        "has_title_echo": title_echo,
+        "purple_prose_hits": hit_count,
+        "is_thematic_closure": hit_count >= 2,
+    }
+
+
 def analyse_text(text: str) -> dict:
     if len(text.strip()) < 50:
         return {
@@ -580,6 +685,7 @@ def analyse_text(text: str) -> dict:
     prof_narr = professional_narrative_score(clean_text)
     creative = creative_writing_signals(clean_text)
     poetry = is_poetry(clean_text)
+    purple_prose = purple_prose_signals(clean_text)
     cliches = cliche_density(clean_text)
     specificity = specificity_score(clean_text)
     self_dep = self_deprecating_density(clean_text)
@@ -633,6 +739,12 @@ def analyse_text(text: str) -> dict:
             cw_ai_score += 0.10
         if creative["plot_density"] > 0.3 and not creative["has_dialogue"]:
             cw_ai_score += 0.10
+        # Thematic-closure signal — distinct from irony/dialogue-absence.
+        # Gated to prose only (not poetry.is_poetry) since genuine short-line
+        # poems already have their own calibrated human-bonus branch below;
+        # this shouldn't compete with that.
+        if purple_prose.get("is_thematic_closure") and not poetry.get("is_poetry"):
+            cw_ai_score += 0.12 * purple_prose["purple_prose_hits"]
         ai_probability = min(1.0, ai_probability + cw_ai_score)
 
     # FIX (Aug 2026): cliche signal was gated behind poetry.is_poetry, which
@@ -746,7 +858,7 @@ def analyse_text(text: str) -> dict:
     return {
         "label": label,
         "category": category_for_label(label),
-        "tier": tier_for_result(label, confidence),
+        "tier": tier_for_result(label, confidence, lean=ai_probability - 0.5),
         "confidence": confidence,
         "ai_probability": ai_probability,
         "explanation": explanation,
@@ -777,6 +889,8 @@ def analyse_text(text: str) -> dict:
             "generic_ratio": specificity.get("generic_ratio", 0),
             "is_overly_generic": specificity.get("is_overly_generic", False),
             "is_ai_greeting_card": is_ai_greeting_card,
+            "purple_prose_hits": purple_prose.get("purple_prose_hits", 0),
+            "is_thematic_closure": purple_prose.get("is_thematic_closure", False),
         },
         "word_count": len(clean_text.split()),
         "sentence_count": len(sentences),
@@ -1361,10 +1475,15 @@ def analyse_image(content: bytes) -> dict:
             confidence = 50
             explanation = f"Mixed signals. AI indicators: {'; '.join(ai_indicators) if ai_indicators else 'none'}. Human indicators: {'; '.join(human_indicators) if human_indicators else 'none'}."
 
+    # "unknown" specifically means zero indicators either way — don't invent
+    # a lean from a near-zero fft_contribution alone, that would spuriously
+    # claim a direction the data doesn't support.
+    img_lean = None if label == "unknown" else (fft_adjusted_ai - human_score)
+
     return {
         "label": label,
         "category": category_for_label(label),
-        "tier": tier_for_result(label, confidence),
+        "tier": tier_for_result(label, confidence, lean=img_lean),
         "confidence": confidence,
         "explanation": explanation,
         "ai_indicators": ai_indicators,
@@ -1492,7 +1611,7 @@ def analyse_video(content: bytes, filename: str) -> dict:
     return {
         "label": label,
         "category": category_for_label(label),
-        "tier": tier_for_result(label, confidence),
+        "tier": tier_for_result(label, confidence, lean=ai_score - human_score),
         "confidence": confidence,
         "explanation": explanation,
         "ai_indicators": ai_indicators,
