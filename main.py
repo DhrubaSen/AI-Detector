@@ -97,6 +97,61 @@ HUMAN_MARKERS = {
 }
 
 
+# ── Human / Mixed / AI category mapping ──────────────────────────────────────
+# Percent confidence reads as falsely precise for something inherently
+# probabilistic. This collapses every fine-grained label used across text,
+# image, and video analysis into one simple three-way category so the
+# frontend can show "Human" / "Mixed" / "AI" instead of a raw number.
+# All underlying signals, indicators, and explanations are unchanged —
+# this is purely an additional field for display purposes.
+CATEGORY_MAP = {
+    "human_written": "Human",
+    "human_captured": "Human",
+    "human_created": "Human",
+    "ai_generated": "AI",
+    "ai_assisted": "Mixed",
+    "uncertain": "Mixed",
+    "unknown": "Mixed",
+    "insufficient_text": "Mixed",
+    "error": "Mixed",
+}
+
+def category_for_label(label: str) -> str:
+    return CATEGORY_MAP.get(label, "Mixed")
+
+
+# ── 5-tier lab-report-style banding ──────────────────────────────────────────
+# Feedback on the 3-way version: collapsing everything to Human/Mixed/AI loses
+# real information — a barely-over-the-line result and an overwhelming one
+# both just say "AI". This adds finer resolution (closer to a lab report's
+# low/normal/high bands) without reintroducing a raw percentage, and drops
+# the word "Uncertain" entirely in favour of "Mixed" for the boundary zone.
+#
+# Deliberately reuses the *existing* label + confidence a result already
+# computed, rather than a new scoring pass — label already encodes direction
+# (leaning AI / leaning human / genuinely mixed) and confidence encodes
+# strength within that direction for the two-sided branches (ai_generated,
+# human_written/human_captured/human_created). The boundary-zone labels
+# (ai_assisted, uncertain, unknown, insufficient_text, error) don't carry a
+# meaningful directional magnitude in the current scoring (their confidence
+# values are flat constants, not a curve), so they all land in "Mixed" as a
+# single band rather than being split further.
+AI_LABELS = {"ai_generated"}
+HUMAN_LABELS = {"human_written", "human_captured", "human_created"}
+TIER_SPLIT_CONFIDENCE = 85  # within a two-sided label, split "Likely X" vs "X"
+
+def tier_for_result(label: str, confidence) -> str:
+    try:
+        conf = float(confidence)
+    except (TypeError, ValueError):
+        conf = 0
+    if label in AI_LABELS:
+        return "AI" if conf >= TIER_SPLIT_CONFIDENCE else "Likely AI"
+    if label in HUMAN_LABELS:
+        return "Human" if conf >= TIER_SPLIT_CONFIDENCE else "Likely Human"
+    return "Mixed"
+
+
 def tokenize_sentences(text: str) -> list[str]:
     lines = [l.strip() for l in text.split("\n") if l.strip()]
     avg_line_len = sum(len(l.split()) for l in lines) / max(len(lines), 1) if lines else 20
@@ -505,6 +560,8 @@ def analyse_text(text: str) -> dict:
     if len(text.strip()) < 50:
         return {
             "label": "insufficient_text",
+            "category": category_for_label("insufficient_text"),
+            "tier": tier_for_result("insufficient_text", 0),
             "confidence": 0,
             "explanation": "Text is too short for reliable analysis (minimum 50 characters).",
             "signals": {}
@@ -578,7 +635,14 @@ def analyse_text(text: str) -> dict:
             cw_ai_score += 0.10
         ai_probability = min(1.0, ai_probability + cw_ai_score)
 
-    if cliches.get("is_high_cliche") and poetry.get("is_poetry"):
+    # FIX (Aug 2026): cliche signal was gated behind poetry.is_poetry, which
+    # only fires when the text has actual line breaks. A poem pasted/exported
+    # as one continuous paragraph (common — many apps strip newlines on
+    # paste) got zero benefit from the cliche count no matter how extreme,
+    # because is_poetry() short-circuits to False with no line breaks to
+    # analyse. A wall of stock AI-greeting-card phrases is suspicious
+    # regardless of formatting, so this no longer requires poetry detection.
+    if cliches.get("is_high_cliche"):
         ai_probability = min(1.0, ai_probability + cliches["cliche_count"] * 0.06)
         if cliches["cliche_count"] >= 4:
             ai_probability = min(1.0, ai_probability + 0.25)
@@ -681,6 +745,8 @@ def analyse_text(text: str) -> dict:
 
     return {
         "label": label,
+        "category": category_for_label(label),
+        "tier": tier_for_result(label, confidence),
         "confidence": confidence,
         "ai_probability": ai_probability,
         "explanation": explanation,
@@ -1044,6 +1110,8 @@ def analyse_image(content: bytes) -> dict:
     if not PIL_OK:
         return {
             "label": "unknown",
+            "category": category_for_label("unknown"),
+            "tier": tier_for_result("unknown", 0),
             "confidence": 0,
             "explanation": "PIL not available for image analysis.",
             "signals": {}
@@ -1054,6 +1122,8 @@ def analyse_image(content: bytes) -> dict:
     except Exception as e:
         return {
             "label": "error",
+            "category": category_for_label("error"),
+            "tier": tier_for_result("error", 0),
             "confidence": 0,
             "explanation": f"Could not open image: {str(e)}",
             "signals": {}
@@ -1231,6 +1301,8 @@ def analyse_image(content: bytes) -> dict:
     if is_likely_screenshot:
         return {
             "label": "human_created",
+            "category": category_for_label("human_created"),
+            "tier": tier_for_result("human_created", 85),
             "confidence": 85,
             "explanation": f"This appears to be a screenshot, diagram, or document export — not an AI-generated image. Signals: small file size ({file_size_kb:.1f}KB), white/light background, PNG format, no camera metadata.",
             "ai_indicators": ai_indicators,
@@ -1291,6 +1363,8 @@ def analyse_image(content: bytes) -> dict:
 
     return {
         "label": label,
+        "category": category_for_label(label),
+        "tier": tier_for_result(label, confidence),
         "confidence": confidence,
         "explanation": explanation,
         "ai_indicators": ai_indicators,
@@ -1417,6 +1491,8 @@ def analyse_video(content: bytes, filename: str) -> dict:
 
     return {
         "label": label,
+        "category": category_for_label(label),
+        "tier": tier_for_result(label, confidence),
         "confidence": confidence,
         "explanation": explanation,
         "ai_indicators": ai_indicators,
