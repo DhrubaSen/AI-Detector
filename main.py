@@ -591,6 +591,15 @@ def creative_writing_signals(text: str) -> dict:
         "bedroom", "bathroom", "door", "window", "car", "street",
         "laptop", "email", "desk", "bag", "wallet", "cat", "dog",
         "arthur", "emma", "john", "mary", "thomas", "emily", "james",
+        # Period/historical-fiction setting vocabulary — the list above is
+        # almost entirely modern-domestic or nautical, so any archaic-style
+        # fiction had no way to trigger is_creative at all, regardless of
+        # content, blocking every creative-writing-gated signal.
+        "estate", "servant", "horseback", "moorland", "manor", "inn",
+        "tavern", "carriage", "physician", "kingdom", "parish", "squire",
+        "duke", "lady", "governess", "butler", "footman", "parlour",
+        "hearth", "candle", "stagecoach", "chamber", "gentleman",
+        "gallery", "portrait", "cloak", "candlestick", "baronet",
     ]
     is_narrative = (sum(1 for w in narrative_words if w in text_lower) > 1 or
                     plot_density > 0.3)
@@ -661,6 +670,108 @@ def purple_prose_signals(text: str) -> dict:
     }
 
 
+def tense_shift_signals(text: str) -> dict:
+    """
+    A present-tense copula/verb slipping into otherwise past-tense
+    narration outside dialogue — e.g. "Leo is ten years old and right
+    now, hysterical" embedded in past-tense narration. Human writers can
+    do this too (typos, deliberate present-tense asides), so this is a
+    mild contributing signal, not decisive on its own. Only meaningful
+    when the passage is clearly, predominantly past-tense narration —
+    otherwise present tense is just the narrative's natural voice.
+    """
+    text_no_dialogue = re.sub(r'"[^"]*"', '', text)
+    sentences = re.split(r'(?<=[.!?])\s+', text_no_dialogue.strip())
+    sentences = [s.strip() for s in sentences if s.strip()]
+
+    present_copula = re.compile(r'\b(?!It\b)(He|She|They|[A-Z][a-z]+) (is|are)\b')
+    past_markers = re.compile(r'\b\w+ed\b|\b(was|were|had|said|looked|walked|felt|saw|heard)\b', re.IGNORECASE)
+
+    past_tense_sentence_count = sum(1 for s in sentences if past_markers.search(s))
+    is_past_tense_narration = past_tense_sentence_count >= max(3, len(sentences) * 0.5)
+
+    flagged = []
+    for s in sentences:
+        if present_copula.search(s) and not past_markers.search(s):
+            flagged.append(s[:80])
+
+    return {
+        "is_past_tense_narration": is_past_tense_narration,
+        "tense_shift_hits": len(flagged),
+        "flagged_sentences": flagged[:3],
+        "has_tense_shift_glitch": is_past_tense_narration and len(flagged) >= 1,
+    }
+
+
+def opening_vs_rest_comparison(text: str) -> dict:
+    """
+    Compares how AI-typical the opening reads versus the rest of the
+    document. This can show WHERE a document's style changes — it
+    cannot and does not indicate WHICH part was written first. A
+    finished document carries no timestamp or edit history: the same
+    stylistic difference (opening reads more AI-typical than the rest,
+    or vice versa) is equally consistent with many different authoring
+    orders — an AI-written opening a human continued, a human draft with
+    only the opening AI-polished, or simply a human who writes more
+    formally at the start and loosens up. Supplementary to the main
+    verdict, not a replacement for it — and not a sequence detector.
+    """
+    clean = text.replace("¬", "").replace("­", "")
+    sentences = tokenize_sentences(clean)
+    total_words = len(clean.split())
+
+    MIN_TOTAL_WORDS = 180
+    MIN_SEGMENT_WORDS = 60
+    MIN_SENTENCES_FOR_SPLIT = 8
+
+    if total_words < MIN_TOTAL_WORDS or len(sentences) < MIN_SENTENCES_FOR_SPLIT:
+        return {
+            "applicable": False,
+            "reason": "Text is too short for a reliable opening-vs-rest comparison.",
+        }
+
+    split_idx = max(3, len(sentences) // 4)
+    opening_text = " ".join(sentences[:split_idx])
+    while len(opening_text.split()) < MIN_SEGMENT_WORDS and split_idx < len(sentences) - 3:
+        split_idx += 1
+        opening_text = " ".join(sentences[:split_idx])
+
+    remainder_text = " ".join(sentences[split_idx:])
+
+    if len(opening_text.split()) < MIN_SEGMENT_WORDS or len(remainder_text.split()) < MIN_SEGMENT_WORDS:
+        return {
+            "applicable": False,
+            "reason": "Could not split text into two segments with enough content for reliable comparison.",
+        }
+
+    opening_result = analyse_text(opening_text)
+    remainder_result = analyse_text(remainder_text)
+
+    opening_prob = opening_result.get("ai_probability", 0.0)
+    remainder_prob = remainder_result.get("ai_probability", 0.0)
+    delta = round(abs(opening_prob - remainder_prob), 3)
+
+    return {
+        "applicable": True,
+        "opening_sentence_count": split_idx,
+        "opening_word_count": len(opening_text.split()),
+        "remainder_word_count": len(remainder_text.split()),
+        "opening_ai_probability": opening_prob,
+        "opening_label": opening_result.get("label"),
+        "remainder_ai_probability": remainder_prob,
+        "remainder_label": remainder_result.get("label"),
+        "delta": delta,
+        "is_notably_non_uniform": delta >= 0.25,
+        "note": (
+            "This compares how AI-typical the opening reads versus the rest "
+            "of the document. A difference here shows WHERE the text's style "
+            "changes — it does not and cannot indicate which part was "
+            "written first. The same stylistic pattern is consistent with "
+            "many different authoring orders."
+        ),
+    }
+
+
 def analyse_text(text: str) -> dict:
     if len(text.strip()) < 50:
         return {
@@ -686,6 +797,7 @@ def analyse_text(text: str) -> dict:
     creative = creative_writing_signals(clean_text)
     poetry = is_poetry(clean_text)
     purple_prose = purple_prose_signals(clean_text)
+    tense_shift = tense_shift_signals(clean_text)
     cliches = cliche_density(clean_text)
     specificity = specificity_score(clean_text)
     self_dep = self_deprecating_density(clean_text)
@@ -745,6 +857,12 @@ def analyse_text(text: str) -> dict:
         # this shouldn't compete with that.
         if purple_prose.get("is_thematic_closure") and not poetry.get("is_poetry"):
             cw_ai_score += 0.12 * purple_prose["purple_prose_hits"]
+        # Tense-shift glitch — a present-tense character-attribute copula
+        # slipping into otherwise past-tense narration. Mild signal (a
+        # human can absolutely make this slip too), so weighted modestly
+        # and capped, gated to prose like purple_prose above.
+        if tense_shift.get("has_tense_shift_glitch") and not poetry.get("is_poetry"):
+            cw_ai_score += min(0.15, 0.08 * tense_shift["tense_shift_hits"])
         ai_probability = min(1.0, ai_probability + cw_ai_score)
 
     # FIX (Aug 2026): cliche signal was gated behind poetry.is_poetry, which
@@ -833,7 +951,7 @@ def analyse_text(text: str) -> dict:
                 f"Signals: low entropy variance, formal transition words, "
                 f"uniform sentence structure."
             )
-    elif ai_probability >= 0.45:
+    elif ai_probability >= 0.40:
         label = "ai_assisted"
         confidence = round(ai_probability * 100)
         if is_creative:
@@ -855,10 +973,18 @@ def analyse_text(text: str) -> dict:
             f"Natural language variance, colloquial markers, vocabulary richness detected."
         )
 
+    # Deadzone around the midpoint: a lean this close to 0.5 carries almost
+    # no real evidence of direction (demonstrated concretely — a text with
+    # known AI-first, human-edited origin scored ai_probability=0.449,
+    # landing narrowly on the wrong side and asserting the reverse
+    # direction with false confidence). Below this margin, don't guess.
+    _raw_lean = ai_probability - 0.5
+    _text_lean = _raw_lean if abs(_raw_lean) >= 0.08 else None
+
     return {
         "label": label,
         "category": category_for_label(label),
-        "tier": tier_for_result(label, confidence, lean=ai_probability - 0.5),
+        "tier": tier_for_result(label, confidence, lean=_text_lean),
         "confidence": confidence,
         "ai_probability": ai_probability,
         "explanation": explanation,
@@ -891,6 +1017,8 @@ def analyse_text(text: str) -> dict:
             "is_ai_greeting_card": is_ai_greeting_card,
             "purple_prose_hits": purple_prose.get("purple_prose_hits", 0),
             "is_thematic_closure": purple_prose.get("is_thematic_closure", False),
+            "tense_shift_hits": tense_shift.get("tense_shift_hits", 0),
+            "has_tense_shift_glitch": tense_shift.get("has_tense_shift_glitch", False),
         },
         "word_count": len(clean_text.split()),
         "sentence_count": len(sentences),
@@ -1643,6 +1771,7 @@ async def check_text(payload: dict):
     if cache_key in cache:
         return cache[cache_key]
     result = analyse_text(text)
+    result["opening_vs_rest"] = opening_vs_rest_comparison(text)
     cache[cache_key] = result
     return result
 
