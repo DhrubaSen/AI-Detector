@@ -1392,7 +1392,7 @@ def analyse_image(content: bytes) -> dict:
                     ai_indicators.append(f"Software tag: {software}")
                     break
             if has_camera_exif:
-                human_indicators.append("Camera EXIF data present (Make, Model, GPS, etc.)")
+                human_indicators.append("Camera EXIF data present (Make, Model, GPS, etc.) — note: genuine camera metadata confirms a real camera captured this file, but not that the scene in frame wasn't itself a screen playing AI-generated content")
             elif not has_ai_software_tag:
                 ai_indicators.append("No camera EXIF metadata (typical of AI-generated images)")
         else:
@@ -1510,9 +1510,7 @@ def analyse_image(content: bytes) -> dict:
     signals["format"] = fmt
     signals["mode"] = img.mode
 
-    if fmt == "PNG" and not has_camera_exif:
-        ai_indicators.append("PNG format without camera EXIF — common AI output format")
-    elif fmt in ("JPEG", "JPG") and has_camera_exif:
+    if fmt in ("JPEG", "JPG") and has_camera_exif:
         human_indicators.append("JPEG with camera metadata — consistent with real photograph")
 
     is_likely_screenshot = False
@@ -1536,8 +1534,23 @@ def analyse_image(content: bytes) -> dict:
     except Exception:
         pass
 
-    ai_score = len(ai_indicators)
-    human_score = len(human_indicators)
+    # No-EXIF is weak evidence on its own — most messaging/social platforms
+    # (WhatsApp, Instagram, Messenger, Discord) strip EXIF automatically,
+    # so its absence is common for ordinary human photos, not just AI
+    # output. Discounted rather than removed entirely, since it's still
+    # mild corroborating evidence when combined with other signals.
+    EXIF_WEAK_SIGNAL_PHRASES = ("No EXIF metadata found", "No camera EXIF metadata (typical of AI-generated images)")
+    has_weak_exif_signal = any(p in ai_indicators for p in EXIF_WEAK_SIGNAL_PHRASES)
+    ai_score = len(ai_indicators) - (0.6 if has_weak_exif_signal else 0)
+
+    # Genuine camera EXIF only proves a real camera captured the file — not
+    # that the scene in frame wasn't itself a screen playing AI-generated
+    # content (a real camera recording a monitor produces fully authentic
+    # metadata). Narrower attack vector than EXIF stripping, so a lighter
+    # discount than the no-EXIF case above, but still shouldn't carry full
+    # weight on its own.
+    has_camera_exif_signal = any("Camera EXIF data present" in h for h in human_indicators)
+    human_score = len(human_indicators) - (0.3 if has_camera_exif_signal else 0)
     total = ai_score + human_score
 
     if is_likely_screenshot:
@@ -1655,7 +1668,11 @@ AI_VIDEO_TOOLS = [
 ]
 
 CAMERA_VIDEO_MARKERS = [
-    "make", "model", "gps", "camera", "lens", "iso", "exposure",
+    # FIX: "iso" removed — it isn't distinguishable from "isom"/"iso2",
+    # the standard MP4 file-type brand every MP4 container has regardless
+    # of source (a bare-minimum synthetic MP4 with zero real metadata was
+    # confirmed to trigger a false "camera detected" match on this alone).
+    "make", "model", "gps", "camera", "lens", "exposure",
     "sony", "canon", "nikon", "gopro", "iphone", "samsung", "pixel",
     "dji", "fujifilm", "panasonic", "olympus",
 ]
@@ -1699,7 +1716,7 @@ def analyse_video(content: bytes, filename: str) -> dict:
 
     found_camera = []
     for marker in CAMERA_VIDEO_MARKERS:
-        if marker in header_text:
+        if re.search(r'\b' + re.escape(marker) + r'\b', header_text):
             found_camera.append(marker)
     if found_camera:
         human_indicators.append(f"Camera/device metadata found: {', '.join(found_camera[:3])}")

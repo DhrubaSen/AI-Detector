@@ -734,7 +734,7 @@ function renderImageResult(data, targetId) {
       <div class="explanation">${data.explanation || ''}</div>
       ${indicatorsHtml ? `<div class="indicators">${indicatorsHtml}</div>` : ''}
       <div style="font-size:11px;color:#64748b;margin-top:8px;padding:8px;background:#0f1117;border-radius:6px;">
-        ℹ️ Whole-image analysis only — cannot determine which elements within the image are AI vs human. Images shared via WhatsApp or social media may have camera metadata stripped, affecting accuracy.
+        ℹ️ Whole-image analysis only — cannot determine which elements within the image are AI vs human. Camera metadata reliability varies by how a file was shared: WhatsApp and similar apps strip metadata when a photo/video is sent normally, but preserve it completely when sent as a Document/File attachment — so metadata presence or absence isn't fully reliable evidence on its own.
       </div>
     </div>
     ${complianceHtml}
