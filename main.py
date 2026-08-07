@@ -63,6 +63,14 @@ class BoundedCache(OrderedDict):
 
 cache: dict = BoundedCache()
 
+# ── Upload size limits ────────────────────────────────────────────────────────
+# Addresses audit Finding 02 (HIGH): no server-side file size caps existed.
+# Video's 100MB matches what the frontend UI already advertises to users.
+MAX_TEXT_CHARS = 200_000       # ~30-40k words, generous beyond any real document
+MAX_DOCUMENT_BYTES = 20 * 1024 * 1024   # 20MB
+MAX_IMAGE_BYTES = 25 * 1024 * 1024      # 25MB
+MAX_VIDEO_BYTES = 100 * 1024 * 1024     # 100MB — already advertised in the UI
+
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 app = FastAPI(title="AI Content Detector", version="1.0.0")
 
@@ -72,6 +80,31 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def add_security_headers(request, call_next):
+    """
+    Adds the 6 standard security headers flagged as missing in the
+    2026-08 passive security audit (Finding 01, CRITICAL, +3 risk points).
+    """
+    response = await call_next(request)
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline' https://gc.zgo.at; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "connect-src 'self' https://dhrubasen.goatcounter.com; "
+        "frame-ancestors 'none'"
+    )
+    response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = (
+        "camera=(), microphone=(), geolocation=(), interest-cohort=()"
+    )
+    return response
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TEXT ANALYSIS ENGINE
@@ -601,7 +634,8 @@ def creative_writing_signals(text: str) -> dict:
         "hearth", "candle", "stagecoach", "chamber", "gentleman",
         "gallery", "portrait", "cloak", "candlestick", "baronet",
     ]
-    is_narrative = (sum(1 for w in narrative_words if w in text_lower) > 1 or
+    words_in_text = set(re.findall(r'\b[a-z]+\b', text_lower))
+    is_narrative = (sum(1 for w in narrative_words if w in words_in_text) > 1 or
                     plot_density > 0.3)
 
     return {
@@ -1784,6 +1818,8 @@ async def check_text(payload: dict):
     text = payload.get("text", "")
     if not text:
         raise HTTPException(status_code=400, detail="No text provided")
+    if len(text) > MAX_TEXT_CHARS:
+        raise HTTPException(status_code=413, detail=f"Text too long — maximum {MAX_TEXT_CHARS:,} characters")
     cache_key = hashlib.sha256(text.encode()).hexdigest()
     if cache_key in cache:
         return cache[cache_key]
@@ -1796,6 +1832,8 @@ async def check_text(payload: dict):
 @app.post("/api/check-document")
 async def check_document(file: UploadFile = File(...)):
     content = await file.read()
+    if len(content) > MAX_DOCUMENT_BYTES:
+        raise HTTPException(status_code=413, detail=f"File too large — maximum {MAX_DOCUMENT_BYTES // (1024*1024)}MB")
     cache_key = hashlib.sha256(content).hexdigest()
     if cache_key in cache:
         return cache[cache_key]
@@ -1828,6 +1866,8 @@ async def check_document(file: UploadFile = File(...)):
 @app.post("/api/check-image")
 async def check_image(file: UploadFile = File(...)):
     content = await file.read()
+    if len(content) > MAX_IMAGE_BYTES:
+        raise HTTPException(status_code=413, detail=f"File too large — maximum {MAX_IMAGE_BYTES // (1024*1024)}MB")
     cache_key = hashlib.sha256(content).hexdigest()
     if cache_key in cache:
         return cache[cache_key]
@@ -1876,6 +1916,8 @@ async def check_image(file: UploadFile = File(...)):
 @app.post("/api/check-video")
 async def check_video(file: UploadFile = File(...)):
     content = await file.read()
+    if len(content) > MAX_VIDEO_BYTES:
+        raise HTTPException(status_code=413, detail=f"File too large — maximum {MAX_VIDEO_BYTES // (1024*1024)}MB")
     cache_key = hashlib.sha256(content).hexdigest()
     if cache_key in cache:
         return cache[cache_key]
