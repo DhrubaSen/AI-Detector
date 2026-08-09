@@ -14,10 +14,10 @@ let docFile = null;
 let imgFile = null;
 let vidFile = null;
 
-function switchTab(tab) {
+function switchTab(tab, btnEl) {
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
-  event.target.classList.add('active');
+  btnEl.classList.add('active');
   document.getElementById('panel-' + tab).classList.add('active');
 }
 
@@ -209,7 +209,7 @@ function renderResult(data, targetId) {
     </div>
     ${signalsHtml}
     <div class="card" style="padding:16px;">
-      <div style="font-size:14px;font-weight:600;color:#94D2BD;margin-bottom:10px;cursor:pointer;" onclick="toggleSecondOpinion()">
+      <div id="second-opinion-header" style="font-size:14px;font-weight:600;color:#94D2BD;margin-bottom:10px;cursor:pointer;">
         💡 How to Get a Second Opinion <span id="second-opinion-toggle" style="font-size:11px;color:#64748b;">▼ show</span>
       </div>
       <div id="second-opinion-panel" style="display:none;">
@@ -224,6 +224,10 @@ function renderResult(data, targetId) {
       </div>
     </div>`;
   el.classList.add('show');
+  const secondOpinionHeader = document.getElementById('second-opinion-header');
+  if (secondOpinionHeader) {
+    secondOpinionHeader.addEventListener('click', toggleSecondOpinion);
+  }
 }
 
 function renderImageResult(data, targetId) {
@@ -441,3 +445,58 @@ function renderVideoResult(data, targetId) {
     ${sigHtml ? `<div class="card"><h2>Video Signals</h2><div class="signals-grid">${sigHtml}</div></div>` : ''}`;
   el.classList.add('show');
 }
+
+// ── Event wiring (was inline onclick/onchange/ondrop/etc attributes) ────────
+// Moved out of index.html so the CSP script-src directive can drop
+// 'unsafe-inline' without breaking every button/drop-zone in the app.
+document.addEventListener('DOMContentLoaded', () => {
+  // Main tabs
+  const mainTabs = [
+    ['tab-text', 'text'],
+    ['tab-document', 'document'],
+    ['tab-image', 'image'],
+    ['tab-video', 'video'],
+  ];
+  mainTabs.forEach(([id, tab]) => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('click', () => switchTab(tab, el));
+  });
+
+  // Video sub-tabs
+  const vidTabUpload = document.getElementById('vid-tab-upload');
+  const vidTabUrl = document.getElementById('vid-tab-url');
+  if (vidTabUpload) vidTabUpload.addEventListener('click', () => switchVideoTab('upload'));
+  if (vidTabUrl) vidTabUrl.addEventListener('click', () => switchVideoTab('url'));
+
+  // Analyse buttons
+  const textBtn = document.getElementById('text-btn');
+  if (textBtn) textBtn.addEventListener('click', analyseText);
+  const docBtn = document.getElementById('doc-btn');
+  if (docBtn) docBtn.addEventListener('click', analyseDocument);
+  const imgBtn = document.getElementById('img-btn');
+  if (imgBtn) imgBtn.addEventListener('click', analyseImage);
+  const vidBtn = document.getElementById('vid-btn');
+  if (vidBtn) vidBtn.addEventListener('click', analyseVideo);
+  const vidUrlBtn = document.getElementById('vid-url-btn');
+  if (vidUrlBtn) vidUrlBtn.addEventListener('click', analyseVideoUrl);
+
+  // Drop zones + file inputs (doc, img, vid)
+  const dropTypes = [
+    ['doc-drop', 'doc-input', 'doc'],
+    ['img-drop', 'img-input', 'img'],
+    ['vid-drop', 'vid-input', 'vid'],
+  ];
+  dropTypes.forEach(([dropId, inputId, type]) => {
+    const dropEl = document.getElementById(dropId);
+    const inputEl = document.getElementById(inputId);
+    if (dropEl && inputEl) {
+      dropEl.addEventListener('click', () => inputEl.click());
+      dropEl.addEventListener('dragover', (e) => dragOver(e, dropId));
+      dropEl.addEventListener('dragleave', () => dragLeave(dropId));
+      dropEl.addEventListener('drop', (e) => dropFile(e, type));
+    }
+    if (inputEl) {
+      inputEl.addEventListener('change', (e) => fileSelected(e, type));
+    }
+  });
+});

@@ -292,10 +292,10 @@
 </header>
 
 <div class="tabs">
-  <button class="tab active" onclick="switchTab('text')">📝 Text</button>
-  <button class="tab" onclick="switchTab('document')">📄 Document</button>
-  <button class="tab" onclick="switchTab('image')">🖼️ Image</button>
-  <button class="tab" onclick="switchTab('video')">🎬 Video</button>
+  <button class="tab active" id="tab-text">📝 Text</button>
+  <button class="tab" id="tab-document">📄 Document</button>
+  <button class="tab" id="tab-image">🖼️ Image</button>
+  <button class="tab" id="tab-video">🎬 Video</button>
 </div>
 
 <!-- TEXT PANEL -->
@@ -303,7 +303,7 @@
   <div class="card">
     <h2>Paste Text to Analyse</h2>
     <textarea id="text-input" placeholder="Paste any text here — article, essay, email, report, social post..."></textarea>
-    <button class="btn" id="text-btn" onclick="analyseText()">🔍 Analyse Text</button>
+    <button class="btn" id="text-btn">🔍 Analyse Text</button>
   </div>
   <div class="result" id="text-result"></div>
 </div>
@@ -312,19 +312,18 @@
 <div class="panel" id="panel-document">
   <div class="card">
     <h2>Upload Document</h2>
-    <div class="drop-zone" id="doc-drop" onclick="document.getElementById('doc-input').click()"
-         ondragover="dragOver(event,'doc-drop')" ondragleave="dragLeave('doc-drop')" ondrop="dropFile(event,'doc')">
+    <div class="drop-zone" id="doc-drop">
       <div class="icon">📄</div>
       <p><strong>Click to upload</strong> or drag & drop</p>
       <p style="margin-top:6px">PDF · DOCX · TXT</p>
     </div>
-    <input type="file" id="doc-input" accept=".pdf,.docx,.txt" onchange="fileSelected(event,'doc')">
+    <input type="file" id="doc-input" accept=".pdf,.docx,.txt">
     <div class="file-info" id="doc-file-info">
       <span>📎</span>
       <span class="name" id="doc-file-name"></span>
       <span class="size" id="doc-file-size"></span>
     </div>
-    <button class="btn" id="doc-btn" onclick="analyseDocument()" disabled>🔍 Analyse Document</button>
+    <button class="btn" id="doc-btn" disabled>🔍 Analyse Document</button>
   </div>
   <div class="result" id="doc-result"></div>
 </div>
@@ -333,19 +332,18 @@
 <div class="panel" id="panel-image">
   <div class="card">
     <h2>Upload Image</h2>
-    <div class="drop-zone" id="img-drop" onclick="document.getElementById('img-input').click()"
-         ondragover="dragOver(event,'img-drop')" ondragleave="dragLeave('img-drop')" ondrop="dropFile(event,'img')">
+    <div class="drop-zone" id="img-drop">
       <div class="icon">🖼️</div>
       <p><strong>Click to upload</strong> or drag & drop</p>
       <p style="margin-top:6px">JPG · PNG · WebP · BMP · TIFF</p>
     </div>
-    <input type="file" id="img-input" accept="image/*" onchange="fileSelected(event,'img')">
+    <input type="file" id="img-input" accept="image/*">
     <div class="file-info" id="img-file-info">
       <span>📎</span>
       <span class="name" id="img-file-name"></span>
       <span class="size" id="img-file-size"></span>
     </div>
-    <button class="btn" id="img-btn" onclick="analyseImage()" disabled>🔍 Analyse Image</button>
+    <button class="btn" id="img-btn" disabled>🔍 Analyse Image</button>
   </div>
   <div class="result" id="img-result"></div>
 </div>
@@ -359,25 +357,24 @@
     </div>
     <!-- Video sub-tabs -->
     <div style="display:flex;gap:8px;margin-bottom:16px;">
-      <button class="tab active" id="vid-tab-upload" onclick="switchVideoTab('upload')" style="flex:1;padding:8px;font-size:13px;">📁 Upload File</button>
-      <button class="tab" id="vid-tab-url" onclick="switchVideoTab('url')" style="flex:1;padding:8px;font-size:13px;">🔗 Video URL</button>
+      <button class="tab active" id="vid-tab-upload" style="flex:1;padding:8px;font-size:13px;">📁 Upload File</button>
+      <button class="tab" id="vid-tab-url" style="flex:1;padding:8px;font-size:13px;">🔗 Video URL</button>
     </div>
 
     <!-- Upload panel -->
     <div id="vid-upload-panel">
-      <div class="drop-zone" id="vid-drop" onclick="document.getElementById('vid-input').click()"
-           ondragover="dragOver(event,'vid-drop')" ondragleave="dragLeave('vid-drop')" ondrop="dropFile(event,'vid')">
+      <div class="drop-zone" id="vid-drop">
         <div class="icon">🎬</div>
         <p><strong>Click to upload</strong> or drag & drop</p>
         <p style="margin-top:6px">MP4 · MOV · AVI · WebM · MKV · M4V &nbsp;·&nbsp; Max 100MB</p>
       </div>
-      <input type="file" id="vid-input" accept=".mp4,.mov,.avi,.webm,.mkv,.m4v" onchange="fileSelected(event,'vid')">
+      <input type="file" id="vid-input" accept=".mp4,.mov,.avi,.webm,.mkv,.m4v">
       <div class="file-info" id="vid-file-info">
         <span>📎</span>
         <span class="name" id="vid-file-name"></span>
         <span class="size" id="vid-file-size"></span>
       </div>
-      <button class="btn" id="vid-btn" onclick="analyseVideo()" disabled>🔍 Analyse Video</button>
+      <button class="btn" id="vid-btn" disabled>🔍 Analyse Video</button>
     </div>
 
     <!-- URL panel -->
@@ -387,7 +384,7 @@
       </div>
       <input type="text" id="vid-url-input" placeholder="https://youtube.com/watch?v=... or any video URL"
         style="width:100%;background:#0f1117;border:1px solid #2a2d45;border-radius:8px;padding:12px 14px;color:#e2e8f0;font-size:14px;outline:none;margin-bottom:12px;">
-      <button class="btn" id="vid-url-btn" onclick="analyseVideoUrl()">🔍 Analyse URL</button>
+      <button class="btn" id="vid-url-btn">🔍 Analyse URL</button>
     </div>
   </div>
   <div class="result" id="vid-result"></div>

@@ -91,7 +91,7 @@ async def add_security_headers(request, call_next):
     response = await call_next(request)
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
-        "script-src 'self' 'unsafe-inline' https://gc.zgo.at; "
+        "script-src 'self' https://gc.zgo.at; "
         "style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data:; "
         "connect-src 'self' https://dhrubasen.goatcounter.com; "
