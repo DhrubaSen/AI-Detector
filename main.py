@@ -1701,15 +1701,93 @@ AI_VIDEO_TOOLS = [
     "adobe firefly video", "adobe express", "canva ai video",
 ]
 
-CAMERA_VIDEO_MARKERS = [
-    # FIX: "iso" removed — it isn't distinguishable from "isom"/"iso2",
-    # the standard MP4 file-type brand every MP4 container has regardless
-    # of source (a bare-minimum synthetic MP4 with zero real metadata was
-    # confirmed to trigger a false "camera detected" match on this alone).
-    "make", "model", "gps", "camera", "lens", "exposure",
+# FIX: split into distinctive vs generic tiers. A lone match on a generic
+# word like "gps" or "make" is weak evidence given the crude raw-byte
+# scanning method (no real structured metadata parsing) — it could be
+# coincidental boilerplate from any export pipeline, AI tools included.
+# A distinctive brand/device name is much less likely to appear by chance.
+CAMERA_VIDEO_MARKERS_DISTINCTIVE = [
     "sony", "canon", "nikon", "gopro", "iphone", "samsung", "pixel",
     "dji", "fujifilm", "panasonic", "olympus",
 ]
+CAMERA_VIDEO_MARKERS_GENERIC = [
+    # "iso" removed — it isn't distinguishable from "isom"/"iso2", the
+    # standard MP4 file-type brand every MP4 container has regardless of
+    # source (a bare-minimum synthetic MP4 with zero real metadata was
+    # confirmed to trigger a false "camera detected" match on this alone).
+    "make", "model", "gps", "camera", "lens", "exposure",
+]
+CAMERA_VIDEO_MARKERS = CAMERA_VIDEO_MARKERS_DISTINCTIVE + CAMERA_VIDEO_MARKERS_GENERIC
+
+# ── Real MP4/QuickTime atom-tree parser ──────────────────────────────────────
+# MP4/MOV files are structured as nested "atoms" (4-byte size + 4-byte type,
+# recursively containing more atoms) per Apple's public QuickTime File Format
+# spec. This walks that real structure to extract genuine device metadata —
+# a validated ISO 6709 GPS string, or an actual Make/Model/Software value —
+# rather than scanning raw bytes for a keyword that could be coincidental.
+MP4_CONTAINER_ATOMS = {
+    b'moov', b'trak', b'mdia', b'minf', b'stbl', b'udta',
+    b'edts', b'mvex', b'moof', b'traf', b'dinf',
+}
+MP4_QT_STRING_ATOMS = {
+    b'\xa9xyz': 'gps_iso6709',   # GPS location, ISO 6709 format
+    b'\xa9mak': 'make',
+    b'\xa9mod': 'model',
+    b'\xa9swr': 'software',
+}
+ISO6709_RE = re.compile(r'^[+-]\d{2,3}(\.\d+)?[+-]\d{3}(\.\d+)?([+-]\d+(\.\d+)?)?/?$')
+
+
+def parse_mp4_atoms(data: bytes, max_depth: int = 8, _depth: int = 0) -> dict:
+    """Walk an MP4/MOV atom tree, returning any recognized genuine
+    structured metadata found. Non-container atoms (including the large
+    'mdat' video payload) are skipped via their size field without being
+    read into memory or decoded — fast even on large files, and safe
+    against malformed/truncated/non-MP4 input (returns {} rather than
+    raising)."""
+    found = {}
+    try:
+        if _depth > max_depth:
+            return found
+        pos = 0
+        n = len(data)
+        while pos + 8 <= n:
+            size = struct.unpack('>I', data[pos:pos+4])[0]
+            atype = data[pos+4:pos+8]
+            header_len = 8
+            if size == 1:
+                if pos + 16 > n:
+                    break
+                size = struct.unpack('>Q', data[pos+8:pos+16])[0]
+                header_len = 16
+            elif size == 0:
+                size = n - pos
+            if size < header_len or pos + size > n:
+                break
+            payload = data[pos+header_len: pos+size]
+
+            if atype in MP4_CONTAINER_ATOMS:
+                found.update(parse_mp4_atoms(payload, max_depth, _depth + 1))
+            elif atype == b'meta':
+                inner = payload[4:] if len(payload) > 4 else payload
+                found.update(parse_mp4_atoms(inner, max_depth, _depth + 1))
+            elif atype in MP4_QT_STRING_ATOMS:
+                label = MP4_QT_STRING_ATOMS[atype]
+                if len(payload) >= 4:
+                    str_len = struct.unpack('>H', payload[0:2])[0]
+                    text = payload[4:4+str_len].decode('utf-8', errors='ignore')
+                    if text:
+                        found[label] = text
+
+            pos += size
+    except Exception:
+        return found
+    return found
+
+
+def validate_gps_iso6709(value: str) -> bool:
+    return bool(ISO6709_RE.match(value.strip()))
+
 
 def analyse_video(content: bytes, filename: str) -> dict:
     ai_indicators = []
@@ -1725,7 +1803,6 @@ def analyse_video(content: bytes, filename: str) -> dict:
         signals["format"] = "MP4"
     elif fname.endswith(".mov"):
         signals["format"] = "MOV"
-        human_indicators.append("MOV format — common in iPhone/camera recordings")
     elif fname.endswith(".avi"):
         signals["format"] = "AVI"
     elif fname.endswith(".webm"):
@@ -1740,6 +1817,19 @@ def analyse_video(content: bytes, filename: str) -> dict:
     except Exception:
         header_text = ""
 
+    # Genuine structured metadata (real atom-tree parsing, not keyword
+    # scanning) — parsed over the FULL content since the metadata atom can
+    # sit after a large video payload, not just in the first 64KB.
+    structured_metadata = parse_mp4_atoms(content)
+    signals["structured_metadata"] = structured_metadata
+    if structured_metadata.get("make") or structured_metadata.get("model") or structured_metadata.get("software"):
+        device_parts = [f"{k}={v}" for k, v in structured_metadata.items() if k in ("make", "model", "software")]
+        human_indicators.append(f"Genuine structured device metadata found: {', '.join(device_parts)}")
+    gps_raw = structured_metadata.get("gps_iso6709")
+    if gps_raw and validate_gps_iso6709(gps_raw):
+        human_indicators.append(f"GPS location metadata validates as genuine ISO 6709 format: {gps_raw}")
+        signals["gps_validated"] = True
+
     found_ai_tools = []
     for tool in AI_VIDEO_TOOLS:
         if tool in header_text:
@@ -1752,7 +1842,10 @@ def analyse_video(content: bytes, filename: str) -> dict:
     for marker in CAMERA_VIDEO_MARKERS:
         if re.search(r'\b' + re.escape(marker) + r'\b', header_text):
             found_camera.append(marker)
-    if found_camera:
+    found_distinctive = [m for m in found_camera if m in CAMERA_VIDEO_MARKERS_DISTINCTIVE]
+    found_generic = [m for m in found_camera if m in CAMERA_VIDEO_MARKERS_GENERIC]
+    is_meaningful_camera_evidence = len(found_distinctive) >= 1 or len(found_generic) >= 2
+    if found_camera and is_meaningful_camera_evidence:
         human_indicators.append(f"Camera/device metadata found: {', '.join(found_camera[:3])}")
         signals["camera_markers"] = found_camera[:5]
 
